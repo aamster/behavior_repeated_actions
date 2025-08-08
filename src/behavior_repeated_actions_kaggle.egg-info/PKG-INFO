@@ -1,0 +1,18 @@
+Metadata-Version: 2.4
+Name: behavior-repeated-actions-kaggle
+Version: 0.1.0
+Summary: Add your description here
+Requires-Python: >=3.12
+Requires-Dist: matplotlib>=3.10.3
+Requires-Dist: pandas>=2.3.1
+Requires-Dist: pandas-stubs==2.3.0.250703
+Requires-Dist: torch<=2.2.2
+Requires-Dist: numpy<2
+Requires-Dist: click
+Requires-Dist: zarr
+Requires-Dist: tqdm
+Requires-Dist: pydantic>=2.11.7
+Requires-Dist: loguru>=0.7.3
+Requires-Dist: wandb>=0.21.0
+Requires-Dist: scipy>=1.16.1
+Requires-Dist: torchmetrics>=1.8.0

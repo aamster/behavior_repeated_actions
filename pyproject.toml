@@ -1,0 +1,32 @@
+[project]
+name = "behavior-repeated-actions-kaggle"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.12"
+dependencies = [
+    "matplotlib>=3.10.3",
+    "pandas>=2.3.1",
+    "pandas-stubs==2.3.0.250703",
+    "torch<=2.2.2",
+    "numpy<2",
+    "click",
+    "zarr",
+    "tqdm",
+    "pydantic>=2.11.7",
+    "loguru>=0.7.3",
+    "wandb>=0.21.0",
+    "scipy>=1.16.1",
+    "torchmetrics>=1.8.0",
+]
+
+[dependency-groups]
+dev = [
+    "jupyterlab>=4.4.4",
+]
+
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
