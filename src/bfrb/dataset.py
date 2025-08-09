@@ -7,8 +7,8 @@ import tensorstore
 import torch
 from torch.utils.data import Dataset
 
-MEAN = torch.tensor([1.6399796189744236, 1.790703594474254, -0.45981063270182365, 0.36037534690736855, -0.11991601069819327, -0.05995317416806099, -0.18829815529791255], device="cuda" if torch.cuda.is_available() else "cpu")
-STD = torch.tensor([5.781253985376394, 5.003941058357719, 6.096484699468417, 0.22573912799066284, 0.46552001098903634, 0.5430271823494489, 0.5041364764608589], device="cuda" if torch.cuda.is_available() else "cpu")
+MEAN = torch.tensor([1.6399796189744236, 1.790703594474254, -0.45981063270182365, 0.36037534690736855, -0.11991601069819327, -0.05995317416806099, -0.18829815529791255])
+STD = torch.tensor([5.781253985376394, 5.003941058357719, 6.096484699468417, 0.22573912799066284, 0.46552001098903634, 0.5430271823494489, 0.5041364764608589])
 
 ACTION_ID_MAP = {
     'moves hand to target location': 0,
@@ -101,7 +101,7 @@ class BFRBDataset(Dataset):
             end = min(start + self._window_length, sequence_length)
 
         x = torch.tensor(self._data[arr_idx, start:end].read().result(), dtype=torch.float)  # (T, C)
-        x = (x - MEAN) / STD
+        x = (x - MEAN.to(x.device)) / STD.to(x.device)
         y = torch.tensor(actions[start:end], dtype=torch.long)
 
         sequence_label = gesture
