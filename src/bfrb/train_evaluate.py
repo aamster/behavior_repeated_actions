@@ -179,7 +179,6 @@ def train_epoch(
     model: EncoderTransformer,
     optimizer,
     epoch: int,
-    n_epochs: int,
     model_weights_out_dir: Path,
     best_loss: float,
     decay_learning_rate: bool = True,
@@ -388,7 +387,6 @@ def train(
             loss_eval_interval=loss_eval_interval,
             accuracy_eval_interval=accuracy_eval_interval,
             autocast_context=autocast_context,
-            n_epochs=n_epochs,
         )
 
 

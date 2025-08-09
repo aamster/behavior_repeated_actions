@@ -8,6 +8,7 @@ import click
 import numpy as np
 import pandas as pd
 import torch
+import wandb
 from loguru import logger
 from torch import optim
 from torch.utils.data import DataLoader
@@ -36,6 +37,30 @@ def main(config_path: Path):
         torch.random.manual_seed(config.seed)
         random.seed(config.seed)
         np.random.seed(config.seed)
+
+    os.environ["USE_WANDB"] = str(config.use_wandb)
+    if config.use_wandb:
+        if config.wandb_api_key is None:
+            raise ValueError("Must provide wandb_api_key")
+        os.environ["WANDB_API_KEY"] = config.wandb_api_key
+
+        wandb.login()
+
+        wandb.init(
+            project="bfrb_kaggle",
+            config={
+                k: v
+                for k, v in config.model_dump().items()
+                if k
+                not in (
+                    "data_path",
+                    "model_weights_out_dir",
+                    "model_weights_path",
+                    "evaluate_only",
+                )
+            },
+        )
+        wandb.config.update({"git_commit": config.git_commit})
 
     train_dataset = BFRBDataset(
         data_path=config.data_dir / 'train.zarr',
