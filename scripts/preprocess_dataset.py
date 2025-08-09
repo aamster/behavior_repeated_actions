@@ -170,7 +170,7 @@ def write_train_test_split(input_path: Path, out_path: Path, train_frac: float =
         meta = json.load(f)
 
     arr_idxs = set([x['arr_idx'] for x in meta])
-    
+
     train_idxs = [x for x in train_idxs if x in arr_idxs]
     val_idxs = [x for x in val_idxs if x in arr_idxs]
 
