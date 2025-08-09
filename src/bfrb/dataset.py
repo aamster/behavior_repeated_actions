@@ -7,8 +7,8 @@ import tensorstore
 import torch
 from torch.utils.data import Dataset
 
-MEAN = 0.4248633766858372
-STD = 3.8143599731288282
+MEAN = torch.tensor([1.6399796189744236, 1.790703594474254, -0.45981063270182365, 0.36037534690736855, -0.11991601069819327, -0.05995317416806099, -0.18829815529791255], device="cuda" if torch.cuda.is_available() else "cpu")
+STD = torch.tensor([5.781253985376394, 5.003941058357719, 6.096484699468417, 0.22573912799066284, 0.46552001098903634, 0.5430271823494489, 0.5041364764608589], device="cuda" if torch.cuda.is_available() else "cpu")
 
 ACTION_ID_MAP = {
     'moves hand to target location': 0,
