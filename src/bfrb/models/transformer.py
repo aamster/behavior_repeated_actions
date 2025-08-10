@@ -220,6 +220,25 @@ class _EncoderBlock(nn.Module):
             return x
 
 
+class TopKPoolHead(torch.nn.Module):
+    def __init__(self, d_model: int, num_classes: int, k: int):
+        super().__init__()
+        self._cls_head = torch.nn.Linear(d_model, num_classes)  # per-frame logits
+        self.gesture_score_head = torch.nn.Linear(d_model, 1)          # gestureness g_t
+        self._k = k
+
+    def forward(self, H):  # H: [B, T, d_model]
+        logits_t = self._cls_head(H)                 # [B, T, C]
+        scores   = self.gesture_score_head(H).squeeze(-1)   # [B, T]
+        k = min(self._k, H.size(1))
+        # top-K along time
+        idx = scores.topk(k, dim=1).indices         # [B, K]
+        # gather the top-K logits
+        b = torch.arange(H.size(0)).unsqueeze(-1).to(H.device)
+        topk_logits = logits_t[b, idx, :]           # [B, K, C]
+        pooled = topk_logits.mean(dim=1)            # [B, C]
+        return pooled, logits_t, scores
+
 class EncoderTransformer(nn.Module):
     def __init__(
         self,
@@ -231,6 +250,7 @@ class EncoderTransformer(nn.Module):
         n_classes: int,
         dropout: float = 0.0,
         feedforward_hidden_dim: int = 2048,
+        num_top_gesture_idx: int = 15,
         mlp_activation: ActivationFunction = ActivationFunction.GELU,
         projection_type: ProjectionType = ProjectionType.LINEAR
     ):
@@ -242,7 +262,7 @@ class EncoderTransformer(nn.Module):
         self._n_layers = n_layers
         self.positional_embedding = nn.Embedding(self._block_size, self._d_model)
         self.layer_norm = LayerNorm(self._d_model)
-        self.head = nn.Linear(self._d_model, n_classes, bias=False)
+        self.head = TopKPoolHead(d_model=d_model, num_classes=n_classes, k=num_top_gesture_idx)
         self.blocks = nn.ModuleList(
             [
                 _EncoderBlock(
@@ -291,8 +311,8 @@ class EncoderTransformer(nn.Module):
             return attention_weights
 
         x = self.layer_norm(x)
-        logits = self.head(x)
-        return logits
+        pooled_gesture_logits, _, _ = self.head(x)
+        return pooled_gesture_logits
 
     @property
     def num_params(self, non_embedding: bool = True):

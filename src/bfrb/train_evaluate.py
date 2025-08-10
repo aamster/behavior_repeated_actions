@@ -48,36 +48,6 @@ def _compute_f1(labels: torch.Tensor, preds: torch.Tensor) -> float:
 
     return (binary_f1 + macro_f1) / 2
 
-def _predict_gesture_for_sequence(logits: torch.Tensor, theta: float = 0.4, min_width: int = 10) -> int:
-    probs = logits.softmax(-1)                                # [T, C]
-
-    # 0...2 are setup labels
-    gesture_idx_start = 3
-    gesture_idxs = slice(gesture_idx_start, None)
-    # -------------  STEP 1  collapse to "any gesture" prob  -------------
-    # 3: to grab just gesture probs and exclude setup phases
-    p_gest = probs[:, gesture_idxs].sum(-1)    # [T]
-
-    # -------------  STEP 2  3-frame moving average  ----------------------
-    p_smooth = torch.avg_pool1d(p_gest[None,None,:], 3, stride=1, padding=1
-                        ).squeeze()
-
-    # -------------  STEP 3  peak detection  ------------------------------
-    peaks, props = find_peaks(p_smooth.cpu().numpy(),
-                            height=theta, width=min_width)
-    if len(peaks) == 0:                       # clip with no clear gesture
-        # no peaks found. fallback to majority vote
-        logger.warning('No peaks found. Using majority vote instead')
-        gesture_scores = probs[:, gesture_idxs].sum(0)
-        return int(gesture_scores.argmax())
-
-    # keep tallest gesture peak
-    t = peaks[props["peak_heights"].argmax()]
-
-    # -------------  STEP 4  decide WHICH of the gesture classes -------
-    gest_logits = logits[t, gesture_idxs]
-    return int(gest_logits.argmax().item()) + gesture_idx_start
-    
 @torch.no_grad()
 def estimate_performance_metrics(
     train_loader: DataLoader,
@@ -85,7 +55,6 @@ def estimate_performance_metrics(
     model: EncoderTransformer,
     epoch: int,
     eval_iters: int = 200,
-    estimate_f1: bool = True,
     label_smoothing: float = 0.0,
 ):
     out = {"train": {}, "val": {}}
@@ -134,37 +103,31 @@ def estimate_performance_metrics(
         for eval_iter in iterator:
             (
                 input_tensor,
-                target_tensor,
+                _,
                 sequence_labels
             ) = next(data_loader_iter)
 
             if torch.cuda.is_available():
                 input_tensor = input_tensor.to(torch.device(os.environ["DEVICE"]))
-                target_tensor = target_tensor.to(torch.device(os.environ["DEVICE"]))
+                sequence_labels = sequence_labels.to(torch.device(os.environ["DEVICE"]))
 
             logits, predsi = inference(
                 model=model,
                 input_tensor=input_tensor,
-                target_tensor=target_tensor,
-                do_test_time_inference=estimate_f1,
                 pad_token_id=PAD_TOKEN_ID,
             )
 
             C = logits.size(-1)
             loss = F.cross_entropy(
                 logits.view(-1, C),
-                target_tensor.view(-1),
-                ignore_index=PAD_TOKEN_ID,
+                sequence_labels.view(-1),
                 label_smoothing=label_smoothing,
             )
             local_losses[eval_iter] = loss
             preds += predsi
             labels += sequence_labels
 
-        if estimate_f1:
-             f1 = _compute_f1(labels=torch.stack(labels), preds=torch.tensor(preds, dtype=torch.long))
-        else:
-            f1 = None
+        f1 = _compute_f1(labels=torch.stack(labels), preds=torch.tensor(preds, dtype=torch.long))
 
         avg_loss = local_losses.mean()
         out[data_loader_name] = {"loss": avg_loss, "f1": f1}
@@ -216,6 +179,9 @@ def train_epoch(
             target_tensor = target_tensor.to(
                 torch.device(os.environ["DEVICE"]), non_blocking=True
             )
+            sequence_labels = sequence_labels.to(
+                torch.device(os.environ["DEVICE"]), non_blocking=True
+            )
 
         if decay_learning_rate:
             assert learning_rate_decay_config is not None
@@ -240,7 +206,6 @@ def train_epoch(
                     model=model,
                     eval_iters=eval_iters,
                     epoch=epoch,
-                    estimate_f1=global_iter_num % accuracy_eval_interval == 0,
                     label_smoothing=label_smoothing,
                 )
 
@@ -280,18 +245,17 @@ def train_epoch(
                     torch.save(checkpoint, Path(model_weights_out_dir) / "ckpt.pt")
 
         with autocast_context:
-            tgt_key_padding_mask = (
-                target_tensor != PAD_TOKEN_ID
-            ).bool()
+            key_padding_mask = (
+                input_tensor != PAD_TOKEN_ID
+            ).bool()[:, :, 0].squeeze(-1)
             logits = model(
-                x=input_tensor, key_padding_mask=tgt_key_padding_mask
+                x=input_tensor, key_padding_mask=key_padding_mask
             )
 
             C = logits.size(-1)
             loss = F.cross_entropy(
                 logits.view(-1, C),
-                target_tensor.view(-1),
-                ignore_index=PAD_TOKEN_ID,
+                sequence_labels.view(-1),
                 label_smoothing=label_smoothing,
             )
 
@@ -315,23 +279,15 @@ def inference(
     model: EncoderTransformer,
     input_tensor: torch.Tensor,
     pad_token_id: int,
-    target_tensor: Optional[torch.Tensor] = None,
-    do_test_time_inference: bool = True,
 ):
-    tgt_key_padding_mask = (target_tensor != pad_token_id).bool()
+    key_padding_mask = (input_tensor != pad_token_id).bool()[:, :, 0].squeeze(-1)
     logits = model(
-        x=input_tensor, key_padding_mask=tgt_key_padding_mask
+        x=input_tensor, key_padding_mask=key_padding_mask
     )
 
-    if do_test_time_inference:
-        preds = []
-        for x in logits:
-            pred = _predict_gesture_for_sequence(logits=x)
-            preds.append(pred)
-    else:
-        probs = F.softmax(logits, dim=-1)
-        _, topi = probs.topk(1)
-        preds = topi.squeeze()
+    probs = F.softmax(logits, dim=-1)
+    _, topi = probs.topk(1)
+    preds = topi.squeeze()
 
 
     return logits, preds
