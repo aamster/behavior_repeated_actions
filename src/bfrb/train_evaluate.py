@@ -1,7 +1,6 @@
 import math
 import os
 import sys
-import time
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,9 +18,8 @@ from torch.utils.data import (
 from loguru import logger
 from torchmetrics.classification import BinaryF1Score, MulticlassF1Score
 from tqdm import tqdm
-from scipy.signal import find_peaks
 
-from bfrb.dataset import BFRB_BEHAVIORS, PAD_TOKEN_ID, ACTION_ID_MAP
+from bfrb.dataset import BFRB_BEHAVIORS, PAD_TOKEN_ID
 from bfrb.models.transformer import EncoderTransformer
 
 logger.remove()
@@ -37,7 +35,7 @@ class LearningRateDecayConfig:
     warmup_iters: int = 2000
     min_lr: float = 5e-5  # should be ~= learning_rate/10 per Chinchilla
 
-def _compute_f1(labels: torch.Tensor, preds: torch.Tensor) -> float:
+def _compute_f1(labels: torch.Tensor, preds: torch.Tensor) -> tuple[float, float, float]:
     binary_labels = torch.tensor([x in BFRB_BEHAVIORS.values() for x in labels])
     binary_preds = torch.tensor([x in BFRB_BEHAVIORS.values() for x in preds])
     binary_f1 = BinaryF1Score()(binary_preds, binary_labels)
@@ -46,7 +44,7 @@ def _compute_f1(labels: torch.Tensor, preds: torch.Tensor) -> float:
     macro_preds = torch.tensor([x-3 if x in BFRB_BEHAVIORS.values() else len(BFRB_BEHAVIORS) for x in preds], dtype=torch.long)
     macro_f1 = MulticlassF1Score(num_classes=len(BFRB_BEHAVIORS)+1, average='macro')(macro_preds, macro_labels)
 
-    return (binary_f1 + macro_f1) / 2
+    return binary_f1, macro_f1, (binary_f1 + macro_f1) / 2
 
 @torch.no_grad()
 def estimate_performance_metrics(
@@ -127,10 +125,10 @@ def estimate_performance_metrics(
             preds += predsi
             labels += sequence_labels
 
-        f1 = _compute_f1(labels=torch.stack(labels), preds=torch.tensor(preds, dtype=torch.long))
+        binary_f1, macro_f1, f1 = _compute_f1(labels=torch.stack(labels), preds=torch.tensor(preds, dtype=torch.long))
 
         avg_loss = local_losses.mean()
-        out[data_loader_name] = {"loss": avg_loss, "f1": f1}
+        out[data_loader_name] = {"loss": avg_loss, "f1": f1, "binary_f1": binary_f1, "macro_f1": macro_f1}
 
     model.train()
     return out
@@ -230,6 +228,10 @@ def train_epoch(
                         "val_cross_entropy_loss": metrics["val"]["loss"],
                         "train_f1": metrics["train"]["f1"],
                         "val_f1": metrics["val"]["f1"],
+                        "train_binary_f1": metrics["train"]["binary_f1"],
+                        "val_binary_f1": metrics["val"]["binary_f1"],
+                        "train_macro_f1": metrics["train"]["macro_f1"],
+                        "val_macro_f1": metrics["val"]["macro_f1"],
                     }
                 )
 
@@ -262,7 +264,7 @@ def train_epoch(
         scaler.scale(loss).backward()
 
         scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 3.0)
 
         scaler.step(optimizer)
         scaler.update()

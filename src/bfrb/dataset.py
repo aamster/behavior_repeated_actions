@@ -101,7 +101,7 @@ class BFRBDataset(Dataset):
             end = min(start + self._window_length, sequence_length)
 
         x = torch.tensor(self._data[arr_idx, start:end].read().result(), dtype=torch.float)  # (T, C)
-        x = (x - MEAN.to(x.device)) / STD.to(x.device)
+        x = (x - MEAN) / STD
         y = torch.tensor(actions[start:end], dtype=torch.long)
 
         sequence_label = gesture
