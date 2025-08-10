@@ -11,10 +11,21 @@ from tqdm import tqdm
 from bfrb.dataset import ACTION_ID_MAP
 
 CHANNEL_IDX_MAP = {
-    **dict(zip([f'acc_{x}' for x in ('x', 'y', 'z')], range(0, 3))),
-    **dict(zip([f'rot_{x}' for x in ('w', 'x', 'y', 'z')], range(3, 7))),
-
+    "acc_x": 0, "acc_y": 1, "acc_z": 2,
+    "rot_w": 3, "rot_x": 4, "rot_y": 5, "rot_z": 6,
 }
+
+
+def get_excluded_sequences(data: pd.DataFrame):
+    data = data.copy()
+    data = data.set_index('sequence_id')
+    bad = set()
+    for seq_id in data.index.unique():
+        if np.isnan(data.loc[seq_id][list(CHANNEL_IDX_MAP.keys())]).any().any():
+            bad.add(seq_id)
+        elif not 'Performs gesture' in data.loc[seq_id]['behavior'].unique():
+            bad.add(seq_id)
+    return bad
 
 def open_tensorstore(
     path: str,
@@ -83,7 +94,10 @@ def open_tensorstore(
 
 def write_data(input_data_path: Path, out_path: Path):
     data = pd.read_csv(input_data_path)
+    excluded = get_excluded_sequences(data=data)
+    data = data[~data['sequence_id'].isin(excluded)]
     data = data.set_index('sequence_id')
+
     max_seq_length = data.groupby('sequence_id').size().max()
 
     shape = (data.index.nunique(), max_seq_length, len(CHANNEL_IDX_MAP))
@@ -107,9 +121,6 @@ def write_data(input_data_path: Path, out_path: Path):
             values = data.loc[sequence_id][col_name].values
             preprocessed[sequence_idx, :len(values), channel_idx] = values
 
-        if np.isnan(preprocessed[sequence_idx][:]).any():
-            continue
-
         actions = []
         gesture = data.loc[sequence_id]['gesture'].iloc[0]
         for i, behavior in enumerate(data.loc[sequence_id]['behavior']):
@@ -117,9 +128,6 @@ def write_data(input_data_path: Path, out_path: Path):
                 actions.append(ACTION_ID_MAP[gesture.lower()])
             else:
                 actions.append(ACTION_ID_MAP[behavior.lower()])
-
-        if not 'Performs gesture' in data.loc[sequence_id]['behavior'].unique():
-            continue
 
         gesture_start = np.where((data.loc[sequence_id]['behavior'] == 'Performs gesture').values)[0][0]
 
@@ -169,13 +177,8 @@ def write_train_test_split(input_path: Path, out_path: Path, train_frac: float =
     with open(input_path / 'meta.json') as f:
         meta = json.load(f)
 
-    arr_idxs = set([x['arr_idx'] for x in meta])
-
-    train_idxs = [x for x in train_idxs if x in arr_idxs]
-    val_idxs = [x for x in val_idxs if x in arr_idxs]
-
-    train_meta = [x for x in meta if x['arr_idx'] in train_idxs]
-    val_meta = [x for x in meta if x['arr_idx'] in val_idxs]
+    train_meta = [meta[i] for i in train_idxs]
+    val_meta = [meta[i] for i in val_idxs]
 
     train = open_tensorstore(
         path=str(out_path / 'train.zarr'),
