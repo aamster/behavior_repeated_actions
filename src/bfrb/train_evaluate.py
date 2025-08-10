@@ -35,7 +35,7 @@ class LearningRateDecayConfig:
     warmup_iters: int = 2000
     min_lr: float = 5e-5  # should be ~= learning_rate/10 per Chinchilla
 
-def _compute_f1(labels: torch.Tensor, preds: torch.Tensor) -> tuple[float, float, float]:
+def _compute_f1(labels: list[int], preds: list[int]) -> tuple[float, float, float]:
     binary_labels = torch.tensor([x in BFRB_BEHAVIORS.values() for x in labels])
     binary_preds = torch.tensor([x in BFRB_BEHAVIORS.values() for x in preds])
     binary_f1 = BinaryF1Score()(binary_preds, binary_labels)
@@ -122,10 +122,10 @@ def estimate_performance_metrics(
                 label_smoothing=label_smoothing,
             )
             local_losses[eval_iter] = loss
-            preds += predsi
-            labels += sequence_labels
+            preds += predsi.tolist()
+            labels += sequence_labels.tolist()
 
-        binary_f1, macro_f1, f1 = _compute_f1(labels=torch.stack(labels), preds=torch.tensor(preds, dtype=torch.long))
+        binary_f1, macro_f1, f1 = _compute_f1(labels=labels, preds=preds)
 
         cm = wandb.plot.confusion_matrix(
             y_true=labels, preds=preds, class_names=list(ACTION_ID_MAP.keys())
