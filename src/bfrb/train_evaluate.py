@@ -145,7 +145,7 @@ def train_epoch(
     optimizer,
     epoch: int,
     model_weights_out_dir: Path,
-    best_loss: float,
+    best_metric: float,
     decay_learning_rate: bool = True,
     learning_rate_decay_config: Optional[LearningRateDecayConfig] = None,
     loss_eval_interval: int = 2000,
@@ -176,9 +176,6 @@ def train_epoch(
 
         if torch.cuda.is_available():
             input_tensor = input_tensor.to(
-                torch.device(os.environ["DEVICE"]), non_blocking=True
-            )
-            target_tensor = target_tensor.to(
                 torch.device(os.environ["DEVICE"]), non_blocking=True
             )
             sequence_labels = sequence_labels.to(
@@ -242,13 +239,13 @@ def train_epoch(
                 )
 
             if global_iter_num % accuracy_eval_interval == 0:
-                if metrics["val"]["loss"] < best_loss:
-                    best_loss = metrics["val"]["loss"]
+                if metrics["val"]["f1"] > best_metric:
+                    best_metric = metrics["val"]["f1"]
                     checkpoint = {
                         "model": model.state_dict(),
                         "optimizer": optimizer.state_dict(),
                         "iter_num": global_iter_num,
-                        "best_loss": best_loss,
+                        "best_f1": best_metric,
                     }
                     torch.save(checkpoint, Path(model_weights_out_dir) / "ckpt.pt")
 
@@ -279,7 +276,7 @@ def train_epoch(
         total_loss += loss.item()
 
 
-    return total_loss / len(train_data_loader), best_loss
+    return total_loss / len(train_data_loader), best_metric
 
 
 @torch.no_grad()
@@ -326,13 +323,13 @@ def train(
 ):
     os.makedirs(model_weights_out_dir, exist_ok=True)
 
-    best_loss = float("inf")
+    best_metric = -float("inf")
 
     for epoch in range(1, n_epochs + 1):
         if isinstance(train_dataloader.sampler, DistributedSampler):
             train_dataloader.sampler.set_epoch(epoch=epoch)
 
-        _, best_loss = train_epoch(
+        _, best_metric = train_epoch(
             train_data_loader=train_dataloader,
             val_data_loader=val_dataloader,
             model=model,
@@ -345,7 +342,7 @@ def train(
                 lr_decay_iters=len(train_dataloader) * n_epochs,
                 min_lr=learning_rate / 10,
             ),
-            best_loss=best_loss,
+            best_metric=best_metric,
             model_weights_out_dir=Path(model_weights_out_dir),
             eval_iters=eval_iters,
             loss_eval_interval=loss_eval_interval,
