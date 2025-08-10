@@ -42,9 +42,8 @@ def main(config_path: Path):
     if config.use_wandb:
         if config.wandb_api_key is None:
             raise ValueError("Must provide wandb_api_key")
-        os.environ["WANDB_API_KEY"] = config.wandb_api_key
 
-        wandb.login()
+        wandb.login(key=config.wandb_api_key)
 
         wandb.init(
             project="bfrb_kaggle",
