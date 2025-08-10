@@ -19,7 +19,7 @@ from loguru import logger
 from torchmetrics.classification import BinaryF1Score, MulticlassF1Score
 from tqdm import tqdm
 
-from bfrb.dataset import BFRB_BEHAVIORS, PAD_TOKEN_ID
+from bfrb.dataset import BFRB_BEHAVIORS, PAD_TOKEN_ID, ACTION_ID_MAP
 from bfrb.models.transformer import EncoderTransformer
 
 logger.remove()
@@ -127,8 +127,12 @@ def estimate_performance_metrics(
 
         binary_f1, macro_f1, f1 = _compute_f1(labels=torch.stack(labels), preds=torch.tensor(preds, dtype=torch.long))
 
+        cm = wandb.plot.confusion_matrix(
+            y_true=labels, preds=preds, class_names=list(ACTION_ID_MAP.keys())
+        )
+
         avg_loss = local_losses.mean()
-        out[data_loader_name] = {"loss": avg_loss, "f1": f1, "binary_f1": binary_f1, "macro_f1": macro_f1}
+        out[data_loader_name] = {"loss": avg_loss, "f1": f1, "binary_f1": binary_f1, "macro_f1": macro_f1, "confusion_matrix": cm}
 
     model.train()
     return out
@@ -232,6 +236,8 @@ def train_epoch(
                         "val_binary_f1": metrics["val"]["binary_f1"],
                         "train_macro_f1": metrics["train"]["macro_f1"],
                         "val_macro_f1": metrics["val"]["macro_f1"],
+                        "train_confusion_matrix": metrics["train"]["confusion_matrix"],
+                        "val_confusion_matrix": metrics["val"]["confusion_matrix"],
                     }
                 )
 
