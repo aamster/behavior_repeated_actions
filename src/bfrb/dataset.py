@@ -2,13 +2,15 @@ import json
 import math
 import random
 from pathlib import Path
+from typing import Optional
 
+import pandas as pd
 import tensorstore
 import torch
 from torch.utils.data import Dataset
 
-MEAN = torch.tensor([1.6399796189744236, 1.790703594474254, -0.45981063270182365, 0.36037534690736855, -0.11991601069819327, -0.05995317416806099, -0.18829815529791255])
-STD = torch.tensor([5.781253985376394, 5.003941058357719, 6.096484699468417, 0.22573912799066284, 0.46552001098903634, 0.5430271823494489, 0.5041364764608589])
+MEAN = torch.tensor([1.6359909914071569, 1.8010360549022184, -0.4611939559243808, 2.1679728989417035, 1.8010360549022184, -0.4611939559243808, 0.3604065016258291, -0.12111841775745338, -0.06037032309477175, -0.18815398134691413])
+STD = torch.tensor([5.781401244510568, 5.01774021718201, 6.0884138625190385, 5.603655983681371, 5.01774021718201, 6.0884138625190385, 0.22554675053571338, 0.46488208667061504, 0.5436761616628948, 0.5038059977764576])
 
 ACTION_ID_MAP = {
     'moves hand to target location': 0,
@@ -40,7 +42,11 @@ NON_BFRB_BEHAVIORS = {k: v for k, v in ACTION_ID_MAP.items() if 11 <= v <= 20}
 
 PAD_TOKEN_ID = len(ACTION_ID_MAP) + 1
 
-FEATURES = [f'acc_{x}' for x in ('x', 'y', 'z')] + [f'rot_{x}' for x in ('w', 'x', 'y', 'z')]
+CHANNEL_IDX_MAP = {
+    "acc_x": 0, "acc_y": 1, "acc_z": 2,
+    "acc_x_mirror": 3, "acc_y_mirror": 4, "acc_z_mirror": 5,
+    "rot_w": 6, "rot_x": 7, "rot_y": 8, "rot_z": 9,
+}
 
 class BFRBDataset(Dataset):
     def __init__(
@@ -49,7 +55,7 @@ class BFRBDataset(Dataset):
         meta_path: Path,
         is_train: bool,
         window_length: int = 64,
-        features: list[str] = FEATURES
+        features: Optional[list[str]] = None
     ):
         """
 
@@ -58,6 +64,9 @@ class BFRBDataset(Dataset):
         :param window_length: sequence length to extract from timeseries. 99.9% of examples
             have a gesture length under 64 in the train set
         """
+        if features is None:
+            features = list(CHANNEL_IDX_MAP.keys())
+
         data = tensorstore.open(spec={ # type: ignore
             'driver': 'zarr3',
             'kvstore': {
@@ -110,7 +119,7 @@ class BFRBDataset(Dataset):
             start = max(0, sequence_length - self._window_length)
             end = min(start + self._window_length, sequence_length)
 
-        feature_idxs = [FEATURES.index(x) for x in self._features]
+        feature_idxs = [CHANNEL_IDX_MAP[x] for x in self._features]
         x = torch.tensor(self._data[arr_idx, start:end, feature_idxs].read().result(), dtype=torch.float)  # (T, C)
         x = (x - MEAN[feature_idxs]) / STD[feature_idxs]
         y = torch.tensor(actions[start:end], dtype=torch.long)

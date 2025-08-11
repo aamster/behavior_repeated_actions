@@ -3,7 +3,6 @@ from typing import Optional
 
 from pydantic import BaseModel
 
-from bfrb.dataset import FEATURES
 from bfrb.models.transformer import ActivationFunction, PositionalEncodingType
 
 
@@ -34,7 +33,7 @@ class Config(BaseModel):
     label_smoothing: float = 0.1
     use_mixed_precision: bool = True
     dtype: str = "float16"
-    features: list[str] = FEATURES
+    features: Optional[list[str]] = None    # limit to features
 
     class Config:
         extra = "forbid"
