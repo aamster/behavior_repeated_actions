@@ -40,8 +40,17 @@ NON_BFRB_BEHAVIORS = {k: v for k, v in ACTION_ID_MAP.items() if 11 <= v <= 20}
 
 PAD_TOKEN_ID = len(ACTION_ID_MAP) + 1
 
+FEATURES = [f'acc_{x}' for x in ('x', 'y', 'z')] + [f'rot_{x}' for x in ('w', 'x', 'y', 'z')]
+
 class BFRBDataset(Dataset):
-    def __init__(self, data_path: Path, meta_path: Path, is_train: bool, window_length: int = 64):
+    def __init__(
+        self,
+        data_path: Path,
+        meta_path: Path,
+        is_train: bool,
+        window_length: int = 64,
+        features: list[str] = FEATURES
+    ):
         """
 
         :param data_path:
@@ -64,6 +73,7 @@ class BFRBDataset(Dataset):
         self._meta = meta
         self._window_length = window_length
         self._is_train = is_train
+        self._features = features
 
     def __len__(self):
         return len(self._meta)
@@ -100,8 +110,9 @@ class BFRBDataset(Dataset):
             start = max(0, sequence_length - self._window_length)
             end = min(start + self._window_length, sequence_length)
 
-        x = torch.tensor(self._data[arr_idx, start:end].read().result(), dtype=torch.float)  # (T, C)
-        x = (x - MEAN) / STD
+        feature_idxs = [FEATURES.index(x) for x in self._features]
+        x = torch.tensor(self._data[arr_idx, start:end, feature_idxs].read().result(), dtype=torch.float)  # (T, C)
+        x = (x - MEAN[feature_idxs]) / STD[feature_idxs]
         y = torch.tensor(actions[start:end], dtype=torch.long)
 
         sequence_label = gesture
@@ -109,4 +120,4 @@ class BFRBDataset(Dataset):
 
     @property
     def num_channels(self):
-        return self._data.shape[-1]
+        return len(self._features)

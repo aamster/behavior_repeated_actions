@@ -65,13 +65,15 @@ def main(config_path: Path):
         data_path=config.data_dir / 'train.zarr',
         meta_path=config.data_dir / 'train.json',
         is_train=True,
-        window_length=config.window_length
+        window_length=config.window_length,
+        features=config.features
     )
     val_dataset = BFRBDataset(
         data_path=config.data_dir / 'val.zarr',
         meta_path=config.data_dir / 'val.json',
         is_train=False,
-        window_length=config.window_length
+        window_length=config.window_length,
+        features=config.features
     )
 
     logger.info(f'Train N: {len(train_dataset)}')
