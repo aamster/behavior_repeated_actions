@@ -1,0 +1,14 @@
+{
+    "method": "grid",
+    "metric": {"goal": "maximize", "name": "val_f1"},
+    "parameters": {
+        "features": {
+            "values": [
+              ["acc_x", "acc_y", "acc_z"],
+              ["acc_x", "acc_y", "acc_z", "handedness"],
+              ["acc_x", "acc_y", "acc_z", "handedness", "pose_xx_earth_coords", "pose_xy_earth_coords", "pose_xz_earth_coords", "pose_yx_earth_coords", "pose_yy_earth_coords", "pose_yz_earth_coords"],
+              ["acc_x", "acc_y", "acc_z", "handedness", "pose_xx_earth_coords", "pose_xy_earth_coords", "pose_xz_earth_coords", "pose_yx_earth_coords", "pose_yy_earth_coords", "pose_yz_earth_coords", "angular_velocity_x", "angular_velocity_y", "angular_velocity_z"]
+            ]
+        }
+    }
+}

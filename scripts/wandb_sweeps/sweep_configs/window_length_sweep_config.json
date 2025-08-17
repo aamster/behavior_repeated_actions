@@ -1,0 +1,10 @@
+{
+    "method": "bayes",
+    "metric": {"goal": "maximize", "name": "val_f1"},
+    "parameters": {
+        "window_length": {
+            "min": 10,
+            "max": 100
+        }
+    }
+}
