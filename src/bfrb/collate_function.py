@@ -3,12 +3,13 @@ import torch.nn.functional as F
 
 
 class CollateFunction:
-    def __init__(self, pad_token_id: int = 0, fixed_length: int = 64):
+    def __init__(self, pad_token_id: int = 0, fixed_length: int = 64, include_handedness: bool = True):
         self._pad_token_id = pad_token_id
         self._fixed_length = fixed_length
+        self._include_handedness = include_handedness
 
     def __call__(self, batch):
-        x, y, sequence_y = zip(*batch)
+        x, y, sequence_y, handedness = zip(*batch)
         x_padded = torch.nn.utils.rnn.pad_sequence(
             x, batch_first=True, padding_value=self._pad_token_id
         )
@@ -28,4 +29,9 @@ class CollateFunction:
         )
 
         sequence_labels = torch.tensor(sequence_y, dtype=torch.long)
-        return x_padded, y_padded, sequence_labels
+        if self._include_handedness:
+            handedness = torch.tensor(handedness, dtype=torch.long)
+        else:
+            handedness = None
+
+        return x_padded, y_padded, sequence_labels, handedness

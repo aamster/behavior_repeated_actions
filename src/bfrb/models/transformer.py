@@ -261,6 +261,7 @@ class EncoderTransformer(nn.Module):
         self._n_attention_heads = n_attention_heads
         self._n_layers = n_layers
         self.positional_embedding = nn.Embedding(self._block_size, self._d_model)
+        self.handedness_embedding = nn.Embedding(2, self._d_model)
         self.layer_norm = LayerNorm(self._d_model)
         self.head = TopKPoolHead(d_model=d_model, num_classes=n_classes, k=num_top_gesture_idx)
         self.blocks = nn.ModuleList(
@@ -288,11 +289,18 @@ class EncoderTransformer(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
+        handedness: Optional[torch.Tensor],
         key_padding_mask: torch.Tensor,
         return_attention_weights: bool = False,
     ):
         _, t, _ = x.size()
+        if handedness is not None:
+            handedness = self.handedness_embedding(handedness)
+
         x = self._projection(x)
+
+        if handedness is not None:
+            x = x + handedness.unsqueeze(1)
         
         x = x + self.positional_embedding(torch.arange(0, t, dtype=torch.long, device=x.device))
 

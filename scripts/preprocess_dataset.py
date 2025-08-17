@@ -3,26 +3,66 @@ from pathlib import Path
 from typing import Optional
 
 import click
+import loguru
 import numpy as np
 import pandas as pd
 import tensorstore
+from scipy.spatial.transform import Rotation
 from tqdm import tqdm
 
-from bfrb.dataset import ACTION_ID_MAP, CHANNEL_IDX_MAP
+from bfrb.dataset import ACTION_ID_MAP, CHANNEL_IDX_MAP, RAW_CHANNELS
 
 
-def mirror_acceleration(accel: np.ndarray):
-    M = np.diag(np.array([-1, 1, 1]))
-    return accel @ M
+def _calculate_angular_velocity(
+        rotation: Rotation,
+        acceleration: np.ndarray,
+        sampling_rate: int = 7    # assuming 7 Hz sampling rate
+):
+    T = rotation.as_matrix().shape[0]
+
+    dt = np.array([1/sampling_rate] * (T-1))
+
+    # Relative rotation from t-1 -> t
+    rel = rotation[:-1].inv() * rotation[1:]            # [T-1] Rotation objects
+    rotvec = rel.as_rotvec()                  # [T-1,3] axis*angle (radians)
+    omega = np.zeros_like(acceleration)           # [T,3]
+    omega[1:] = rotvec / dt[:, None]          # rad/s (approx)
+
+    return omega
+
+def extract_features(orientation: np.ndarray, linear_acceleration: np.ndarray, quat_order: str = "wxyz"):
+    assert orientation.shape[-1] == 4 and linear_acceleration.shape[-1] == 3
+    assert orientation.shape[0] == linear_acceleration.shape[0]
+
+    rot = Rotation.from_quat(
+        orientation,
+        scalar_first=(quat_order.lower() == "wxyz")
+    )
+
+    R_earth = rot.as_matrix()                        # [T,3,3]
+    x_earth = R_earth[:, :, 0]                       # [T,3]
+    y_earth = R_earth[:, :, 1]                       # [T,3]
+
+    # x, y should be unit and orthogonal
+    assert np.allclose(np.linalg.norm(x_earth, axis=1), 1, atol=1e-5)
+    assert np.allclose(np.linalg.norm(y_earth, axis=1), 1, atol=1e-5)
+    assert np.allclose((x_earth * y_earth).sum(1), 0, atol=1e-4)
+
+    ang_velocity = _calculate_angular_velocity(
+        rotation=rot,
+        acceleration=linear_acceleration,
+
+    )
+    feat = np.concatenate([x_earth, y_earth, ang_velocity], axis=1)
+    return feat
 
 def get_excluded_sequences(data: pd.DataFrame):
     data = data.copy()
     data = data.set_index('sequence_id')
     bad = set()
-    raw_channels = [x for x in list(CHANNEL_IDX_MAP.keys()) if 'mirror' not in x]
 
     for seq_id in data.index.unique():
-        if np.isnan(data.loc[seq_id][raw_channels]).any().any():
+        if np.isnan(data.loc[seq_id][RAW_CHANNELS]).any().any():
             bad.add(seq_id)
         elif not 'Performs gesture' in data.loc[seq_id]['behavior'].unique():
             bad.add(seq_id)
@@ -123,21 +163,27 @@ def write_data(input_data_path: Path, subject_meta_path: Path, out_path: Path):
         sequence_length = len(data.loc[sequence_id])
         subject_id = data.loc[sequence_id]['subject'].iloc[0]
 
-        for col_name, channel_idx in CHANNEL_IDX_MAP.items():
-            if 'mirror' not in col_name:
-                values = data.loc[sequence_id][col_name].values
-                preprocessed[sequence_idx, :sequence_length, channel_idx] = values
+        for col_name, channel_idx in {k: v for k, v in CHANNEL_IDX_MAP.items() if k in RAW_CHANNELS}.items():
+            values = data.loc[sequence_id][col_name].values
+            preprocessed[sequence_idx, :sequence_length, channel_idx] = values
 
         acc_idxs = [CHANNEL_IDX_MAP[f'acc_{x}'] for x in ('x', 'y', 'z')]
-        mirror_acc_idxs = [CHANNEL_IDX_MAP[f'acc_{x}_mirror'] for x in ('x', 'y', 'z')]
+        orientation_idxs = [CHANNEL_IDX_MAP[f'rot_{x}'] for x in ('w','x','y','z')]
+        pose_x_earth_coords_idxs = [CHANNEL_IDX_MAP[f'pose_x{x}_earth_coords'] for x in ('x', 'y', 'z')]
+        pose_y_earth_coords_idxs = [CHANNEL_IDX_MAP[f'pose_y{x}_earth_coords'] for x in
+                                    ('x', 'y', 'z')]
+        angular_velocity_idxs = [CHANNEL_IDX_MAP[f'angular_velocity_{x}'] for x in ('x','y','z')]
 
-        if subject_meta.loc[subject_id]['handedness'] == 0:
-            # mirror to common handedness
-            preprocessed[sequence_idx, :sequence_length, mirror_acc_idxs] = mirror_acceleration(
-                accel=preprocessed[sequence_idx, :sequence_length, acc_idxs]
-            )
-        else:
-            preprocessed[sequence_idx, :sequence_length, mirror_acc_idxs] = preprocessed[sequence_idx, :sequence_length, acc_idxs]
+        raw = preprocessed[sequence_idx, :sequence_length].read().result()
+
+        features = extract_features(
+            orientation=raw[:, orientation_idxs],
+            linear_acceleration=raw[:, acc_idxs],
+        )
+
+        preprocessed[sequence_idx, :sequence_length, pose_x_earth_coords_idxs] = features[:, :3]
+        preprocessed[sequence_idx, :sequence_length, pose_y_earth_coords_idxs] = features[:, 3:6]
+        preprocessed[sequence_idx, :sequence_length, angular_velocity_idxs] = features[:, 6:]
 
         actions = []
         gesture = data.loc[sequence_id]['gesture'].iloc[0]
@@ -154,7 +200,9 @@ def write_data(input_data_path: Path, subject_meta_path: Path, out_path: Path):
             'arr_idx': sequence_idx,
             'actions': actions,
             'gesture_start': int(gesture_start),
-            'sequence_length': len(data.loc[sequence_id])
+            'sequence_length': len(data.loc[sequence_id]),
+            'handedness': subject_meta.loc[subject_id]['handedness'],
+            "subject_id": subject_id,
         }
         metadata.append(meta)
 
@@ -188,15 +236,27 @@ def write_train_test_split(input_path: Path, out_path: Path, train_frac: float =
         create=False,
         read=True
     )
-    rng = np.random.default_rng(seed=1234)
-    splitter = DataSplitter(n_examples=data.shape[0], train_frac=train_frac, rng=rng)
-    train_idxs, val_idxs = splitter.split()
 
     with open(input_path / 'meta.json') as f:
         meta = json.load(f)
 
-    train_meta = [meta[i] for i in train_idxs]
-    val_meta = [meta[i] for i in val_idxs]
+    subjects = sorted(list(set([x['subject_id'] for x in meta])))
+
+    rng = np.random.default_rng(seed=1234)
+    splitter = DataSplitter(n_examples=len(subjects), train_frac=train_frac, rng=rng)
+    train_suject_idxs, val_subject_idxs = splitter.split()
+
+    train_subjects = [subjects[i] for i in train_suject_idxs]
+    val_subjects = [subjects[i] for i in val_subject_idxs]
+
+    train_meta = [x for x in meta if x['subject_id'] in train_subjects]
+    val_meta = [x for x in meta if x['subject_id'] in val_subjects]
+
+    train_idxs = [x['arr_idx'] for x in train_meta]
+    val_idxs = [x['arr_idx'] for x in val_meta]
+
+    loguru.logger.info(f'n train: {len(train_idxs)}')
+    loguru.logger.info(f'n val: {len(val_idxs)}')
 
     train = open_tensorstore(
         path=str(out_path / 'train.zarr'),
@@ -252,8 +312,9 @@ def get_stats(input_path: Path):
 
     for row_idx in range(x.shape[0]):
         seq_length = meta[row_idx]['sequence_length']
-        sum_ += np.sum(x[row_idx, :seq_length], axis=0)
-        sumsq_ += np.square(x[row_idx, :seq_length]).sum(axis=0)
+        gesture_start = meta[row_idx]['gesture_start']
+        sum_ += np.sum(x[row_idx, gesture_start:seq_length], axis=0)
+        sumsq_ += np.square(x[row_idx, gesture_start:seq_length]).sum(axis=0)
         N += seq_length
 
     mean = sum_ / N

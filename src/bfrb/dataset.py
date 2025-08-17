@@ -4,13 +4,23 @@ import random
 from pathlib import Path
 from typing import Optional
 
-import pandas as pd
 import tensorstore
 import torch
 from torch.utils.data import Dataset
 
-MEAN = torch.tensor([1.6359909914071569, 1.8010360549022184, -0.4611939559243808, 2.1679728989417035, 1.8010360549022184, -0.4611939559243808, 0.3604065016258291, -0.12111841775745338, -0.06037032309477175, -0.18815398134691413])
-STD = torch.tensor([5.781401244510568, 5.01774021718201, 6.0884138625190385, 5.603655983681371, 5.01774021718201, 6.0884138625190385, 0.22554675053571338, 0.46488208667061504, 0.5436761616628948, 0.5038059977764576])
+MEAN = torch.tensor(
+    [1.708104326580431, 1.8016810227020261, -0.4150403535361312, 0.3594622150221407,
+     -0.12285486519490495, -0.05624846740477902, -0.1909408321459954, -0.1778527128302445,
+     -0.07914598030655579, 0.16757626477402868, 0.2924598595066032, -0.04475735358540609,
+     0.20365658033488682, 0.03898752130849018, -0.03947141240216166, -0.05098241052350764, 0.0]
+
+)
+STD = torch.tensor(
+    [5.790281872199454, 4.975957261468285, 6.10009059329046, 0.22648961638963777,
+     0.4641871113794403, 0.542168557596857, 0.5053288975408595, 0.5315202247021523,
+     0.5732479875022234, 0.5682389615134157, 0.5794098947537498, 0.5334269698963092,
+     0.5007273198182817, 0.8285049371837747, 1.034131242960337, 0.8845794994369625, 0.0]
+)
 
 ACTION_ID_MAP = {
     'moves hand to target location': 0,
@@ -44,9 +54,14 @@ PAD_TOKEN_ID = len(ACTION_ID_MAP) + 1
 
 CHANNEL_IDX_MAP = {
     "acc_x": 0, "acc_y": 1, "acc_z": 2,
-    "acc_x_mirror": 3, "acc_y_mirror": 4, "acc_z_mirror": 5,
-    "rot_w": 6, "rot_x": 7, "rot_y": 8, "rot_z": 9,
+    "rot_w": 3, "rot_x": 4, "rot_y": 5, "rot_z": 6,
+    "pose_xx_earth_coords": 7, "pose_xy_earth_coords": 8, "pose_xz_earth_coords": 9,
+    "pose_yx_earth_coords": 10, "pose_yy_earth_coords": 11, "pose_yz_earth_coords": 12,
+    "angular_velocity_x": 13, "angular_velocity_y": 14, "angular_velocity_z": 15,
+    "handedness": 16
 }
+
+RAW_CHANNELS = [x for x in CHANNEL_IDX_MAP if x in ('acc_x', 'acc_y', 'acc_z', 'rot_w', 'rot_x', 'rot_y', 'rot_z')]
 
 class BFRBDataset(Dataset):
     def __init__(
@@ -93,6 +108,7 @@ class BFRBDataset(Dataset):
         gesture_start = meta["gesture_start"]
         actions = meta["actions"]
         sequence_length = meta["sequence_length"]
+        handedness = meta["handedness"]
         gesture = actions[gesture_start]
 
         if self._is_train:
@@ -119,14 +135,18 @@ class BFRBDataset(Dataset):
             start = max(0, sequence_length - self._window_length)
             end = min(start + self._window_length, sequence_length)
 
-        feature_idxs = [CHANNEL_IDX_MAP[x] for x in self._features]
-        x = torch.tensor(self._data[arr_idx, start:end, feature_idxs].read().result(), dtype=torch.float)  # (T, C)
+        feature_idxs = [CHANNEL_IDX_MAP[x] for x in self._features if x not in ("handedness",)]
+        x =  torch.tensor(self._data[arr_idx, start:end, feature_idxs].read().result(), dtype=torch.float)  # (T, C)
         x = (x - MEAN[feature_idxs]) / STD[feature_idxs]
+
         y = torch.tensor(actions[start:end], dtype=torch.long)
 
         sequence_label = gesture
-        return x, y, sequence_label
+        return x, y, sequence_label, handedness if "handedness" in self._features else None
 
     @property
     def num_channels(self):
-        return len(self._features)
+        num_channels = len(self._features)
+        if "handedness" in self._features:
+            num_channels -= 1 # it gets added separately
+        return num_channels

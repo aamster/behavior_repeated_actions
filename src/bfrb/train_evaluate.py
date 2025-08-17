@@ -102,16 +102,20 @@ def estimate_performance_metrics(
             (
                 input_tensor,
                 _,
-                sequence_labels
+                sequence_labels,
+                handedness
             ) = next(data_loader_iter)
 
             if torch.cuda.is_available():
                 input_tensor = input_tensor.to(torch.device(os.environ["DEVICE"]))
                 sequence_labels = sequence_labels.to(torch.device(os.environ["DEVICE"]))
+                if handedness is not None:
+                    handedness = handedness.to(torch.device(os.environ["DEVICE"]))
 
             logits, predsi = inference(
                 model=model,
                 input_tensor=input_tensor,
+                handedness=handedness,
                 pad_token_id=PAD_TOKEN_ID,
             )
 
@@ -166,7 +170,8 @@ def train_epoch(
         (
             input_tensor,
             target_tensor,
-            sequence_labels
+            sequence_labels,
+            handedness,
         ) = data
         input_tensor: torch.Tensor
         target_tensor: torch.Tensor
@@ -181,6 +186,8 @@ def train_epoch(
             sequence_labels = sequence_labels.to(
                 torch.device(os.environ["DEVICE"]), non_blocking=True
             )
+            if handedness is not None:
+                handedness = handedness.to(torch.device(os.environ["DEVICE"]), non_blocking=True)
 
         if decay_learning_rate:
             assert learning_rate_decay_config is not None
@@ -254,7 +261,7 @@ def train_epoch(
                 input_tensor != PAD_TOKEN_ID
             ).bool()[:, :, 0].squeeze(-1)
             logits = model(
-                x=input_tensor, key_padding_mask=key_padding_mask
+                x=input_tensor, key_padding_mask=key_padding_mask, handedness=handedness
             )
 
             C = logits.size(-1)
@@ -284,10 +291,11 @@ def inference(
     model: EncoderTransformer,
     input_tensor: torch.Tensor,
     pad_token_id: int,
+    handedness: torch.Tensor,
 ):
     key_padding_mask = (input_tensor != pad_token_id).bool()[:, :, 0].squeeze(-1)
     logits = model(
-        x=input_tensor, key_padding_mask=key_padding_mask
+        x=input_tensor, key_padding_mask=key_padding_mask, handedness=handedness
     )
 
     probs = F.softmax(logits, dim=-1)

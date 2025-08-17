@@ -85,7 +85,8 @@ def main(config_path: Path):
         batch_size=config.batch_size,
         collate_fn=CollateFunction(
             fixed_length=config.window_length,
-            pad_token_id=PAD_TOKEN_ID
+            pad_token_id=PAD_TOKEN_ID,
+            include_handedness="handedness" in config.features
         ),
         pin_memory=True,
     )
@@ -97,6 +98,7 @@ def main(config_path: Path):
         collate_fn=CollateFunction(
             fixed_length=config.window_length,
             pad_token_id=PAD_TOKEN_ID,
+            include_handedness="handedness" in config.features
         ),
         pin_memory=True,
     )
