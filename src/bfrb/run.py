@@ -15,7 +15,7 @@ from torch.utils.data import DataLoader
 
 from bfrb.collate_function import CollateFunction
 from bfrb.config.config import TransformerConfig
-from bfrb.dataset import BFRBDataset, ACTION_ID_MAP, PAD_TOKEN_ID
+from bfrb.dataset import BFRBDataset, ACTION_ID_MAP, PAD_TOKEN_ID, BFRB_BEHAVIORS
 from bfrb.models.transformer import EncoderTransformer
 from bfrb.train_evaluate import train, evaluate
 from bfrb.utils.model_loading import fix_model_state_dict

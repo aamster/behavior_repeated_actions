@@ -7,7 +7,7 @@ import click
 def make_temp_config(base_path, **kwargs) -> str:
     with open(base_path) as f:
         cfg = json.load(f)
-    
+
     for k, v in kwargs.items():
         cfg[k] = v
 

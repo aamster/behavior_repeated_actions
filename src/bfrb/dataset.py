@@ -1,6 +1,7 @@
 import json
 import math
 import random
+from enum import Enum
 from pathlib import Path
 from typing import Optional
 
@@ -21,6 +22,11 @@ STD = torch.tensor(
      0.5732479875022234, 0.5682389615134157, 0.5794098947537498, 0.5334269698963092,
      0.5007273198182817, 0.8285049371837747, 1.034131242960337, 0.8845794994369625, 0.0]
 )
+
+class BehaviorType(Enum):
+    BFRB = 'BFRB'
+    NON_BFRB = 'NON_BFRB'
+    SETUP = 'SETUP'
 
 ACTION_ID_MAP = {
     'moves hand to target location': 0,
@@ -46,6 +52,7 @@ ACTION_ID_MAP = {
     'wave hello': 20
 }
 
+SETUP_BEHAVIORS = {k: v for k, v in ACTION_ID_MAP.items() if 0 <= v <= 2}
 BFRB_BEHAVIORS = {k: v for k, v in ACTION_ID_MAP.items() if 3 <= v <= 10}
 NON_BFRB_BEHAVIORS = {k: v for k, v in ACTION_ID_MAP.items() if 11 <= v <= 20}
 
@@ -141,8 +148,8 @@ class BFRBDataset(Dataset):
 
         y = torch.tensor(actions[start:end], dtype=torch.long)
 
-        sequence_label = gesture
-        return x, y, sequence_label, handedness if "handedness" in self._features else None
+
+        return x, y, gesture, handedness if "handedness" in self._features else None
 
     @property
     def num_channels(self):
@@ -150,3 +157,17 @@ class BFRBDataset(Dataset):
         if "handedness" in self._features:
             num_channels -= 1 # it gets added separately
         return num_channels
+
+    @property
+    def num_raw_classes(self) -> int:
+        return len(ACTION_ID_MAP)
+
+    @property
+    def num_sequence_classes(self) -> int:
+        """
+        The dataset contains labels for 3 setup + 8 BFRB + 10 non-BFRB
+        but task is only to predict sequence labels for 8 BFRB + non-BFRB
+
+        :return:
+        """
+        return len(BFRB_BEHAVIORS) + 1

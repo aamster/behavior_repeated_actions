@@ -10,7 +10,7 @@ import tensorstore
 from scipy.spatial.transform import Rotation
 from tqdm import tqdm
 
-from bfrb.dataset import ACTION_ID_MAP, CHANNEL_IDX_MAP, RAW_CHANNELS
+from bfrb.dataset import ACTION_ID_MAP, CHANNEL_IDX_MAP, RAW_CHANNELS, BehaviorType, BFRB_BEHAVIORS
 
 
 def _calculate_angular_velocity(
@@ -337,15 +337,15 @@ def get_stats(input_path: Path):
     type=click.Path(path_type=Path, writable=True)
 )
 def main(input_data_dir: Path, out_path: Path):
-    # write_data(
-    #     input_data_path=input_data_dir / 'train.csv',
-    #     out_path=out_path,
-    #     subject_meta_path=input_data_dir / 'train_demographics.csv',
-    # )
-    # write_train_test_split(
-    #     input_path=out_path,
-    #     out_path=out_path.parent,
-    # )
+    write_data(
+        input_data_path=input_data_dir / 'train.csv',
+        out_path=out_path,
+        subject_meta_path=input_data_dir / 'train_demographics.csv',
+    )
+    write_train_test_split(
+        input_path=out_path,
+        out_path=out_path.parent,
+    )
     mean, std = get_stats(input_path=out_path.parent)
     print(mean)
     print(std)

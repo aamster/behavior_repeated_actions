@@ -19,7 +19,7 @@ from loguru import logger
 from torchmetrics.classification import BinaryF1Score, MulticlassF1Score
 from tqdm import tqdm
 
-from bfrb.dataset import BFRB_BEHAVIORS, PAD_TOKEN_ID, ACTION_ID_MAP
+from bfrb.dataset import BFRB_BEHAVIORS, PAD_TOKEN_ID, ACTION_ID_MAP, BehaviorType
 from bfrb.models.transformer import EncoderTransformer
 
 logger.remove()
@@ -40,8 +40,8 @@ def _compute_f1(labels: list[int], preds: list[int]) -> tuple[float, float, floa
     binary_preds = torch.tensor([x in BFRB_BEHAVIORS.values() for x in preds])
     binary_f1 = BinaryF1Score()(binary_preds, binary_labels)
 
-    macro_labels = torch.tensor([x-3 if x in BFRB_BEHAVIORS.values() else len(BFRB_BEHAVIORS) for x in labels], dtype=torch.long)
-    macro_preds = torch.tensor([x-3 if x in BFRB_BEHAVIORS.values() else len(BFRB_BEHAVIORS) for x in preds], dtype=torch.long)
+    macro_labels = torch.tensor([x-min(BFRB_BEHAVIORS.values()) if x in BFRB_BEHAVIORS.values() else len(BFRB_BEHAVIORS) for x in labels], dtype=torch.long)
+    macro_preds = torch.tensor([x-min(BFRB_BEHAVIORS.values()) if x in BFRB_BEHAVIORS.values() else len(BFRB_BEHAVIORS) for x in preds], dtype=torch.long)
     macro_f1 = MulticlassF1Score(num_classes=len(BFRB_BEHAVIORS)+1, average='macro')(macro_preds, macro_labels)
 
     return binary_f1, macro_f1, (binary_f1 + macro_f1) / 2, macro_labels.tolist(), macro_preds.tolist()
@@ -89,6 +89,7 @@ def estimate_performance_metrics(
         data_loader_iter = iter(data_loader)
 
         local_losses = torch.zeros(eval_iters, device=os.environ["DEVICE"])
+        local_sequence_losses = torch.zeros(eval_iters, device=os.environ["DEVICE"])
 
         iterator = tqdm(
             range(eval_iters),
@@ -98,10 +99,11 @@ def estimate_performance_metrics(
 
         preds = []
         labels = []
+
         for eval_iter in iterator:
             (
                 input_tensor,
-                _,
+                target_tensor,
                 sequence_labels,
                 handedness
             ) = next(data_loader_iter)
@@ -112,31 +114,42 @@ def estimate_performance_metrics(
                 if handedness is not None:
                     handedness = handedness.to(torch.device(os.environ["DEVICE"]))
 
-            logits, predsi = inference(
+            sequence_logits, sequence_preds = inference(
                 model=model,
                 input_tensor=input_tensor,
                 handedness=handedness,
                 pad_token_id=PAD_TOKEN_ID,
             )
 
-            C = logits.size(-1)
-            loss = F.cross_entropy(
-                logits.view(-1, C),
+            C_sequence = sequence_logits.size(-1)
+
+            sequence_loss = F.cross_entropy(
+                sequence_logits.view(-1, C_sequence),
                 sequence_labels.view(-1),
                 label_smoothing=label_smoothing,
             )
+
+            loss = sequence_loss
+
             local_losses[eval_iter] = loss
-            preds += predsi.tolist()
+            local_sequence_losses[eval_iter] = sequence_loss
+            preds += sequence_preds.tolist()
             labels += sequence_labels.tolist()
 
         binary_f1, macro_f1, f1, macro_labels, macro_preds = _compute_f1(labels=labels, preds=preds)
 
         cm = wandb.plot.confusion_matrix(
-            y_true=macro_labels, preds=macro_preds, class_names=list(BFRB_BEHAVIORS.keys()) + ['non-BFRB']
+            y_true=macro_labels, preds=macro_preds, class_names=list(BFRB_BEHAVIORS.keys()) + [BehaviorType.NON_BFRB.value]
         )
 
-        avg_loss = local_losses.mean()
-        out[data_loader_name] = {"loss": avg_loss, "f1": f1, "binary_f1": binary_f1, "macro_f1": macro_f1, "confusion_matrix": cm}
+        out[data_loader_name] = {
+            "loss": local_losses.mean(),
+            "sequence_loss": local_sequence_losses.mean(),
+            "f1": f1,
+            "binary_f1": binary_f1,
+            "macro_f1": macro_f1,
+            "confusion_matrix": cm
+        }
 
     model.train()
     return out
@@ -220,7 +233,8 @@ def train_epoch(
                     f"step {global_iter_num}: train loss {metrics['train']['loss']:.4f}, "
                     f"val loss {metrics['val']['loss']:.4f}, "
                     f"train f1 {metrics['train']['f1']:.4f}, "
-                    f"val f1 {metrics['val']['f1']:.4f}"
+                    f"val f1 {metrics['val']['f1']:.4f} "
+
                 )
             else:
                 logger.info(
@@ -233,6 +247,7 @@ def train_epoch(
                         "iter": global_iter_num,
                         "lr": lr,
                         "train_cross_entropy_loss": metrics["train"]["loss"],
+                        "train_sequence_cross_entropy_loss": metrics["train"]["sequence_loss"],
                         "val_cross_entropy_loss": metrics["val"]["loss"],
                         "train_f1": metrics["train"]["f1"],
                         "val_f1": metrics["val"]["f1"],
@@ -240,7 +255,6 @@ def train_epoch(
                         "val_binary_f1": metrics["val"]["binary_f1"],
                         "train_macro_f1": metrics["train"]["macro_f1"],
                         "val_macro_f1": metrics["val"]["macro_f1"],
-                        "train_confusion_matrix": metrics["train"]["confusion_matrix"],
                         "val_confusion_matrix": metrics["val"]["confusion_matrix"],
                     }
                 )
@@ -260,16 +274,18 @@ def train_epoch(
             key_padding_mask = (
                 input_tensor != PAD_TOKEN_ID
             ).bool()[:, :, 0].squeeze(-1)
-            logits = model(
-                x=input_tensor, key_padding_mask=key_padding_mask, handedness=handedness
+            sequence_logits = model(
+                x=input_tensor, key_padding_mask=key_padding_mask, handedness=handedness,
             )
 
-            C = logits.size(-1)
-            loss = F.cross_entropy(
-                logits.view(-1, C),
+            C_sequence = sequence_logits.size(-1)
+            sequence_loss = F.cross_entropy(
+                sequence_logits.view(-1, C_sequence),
                 sequence_labels.view(-1),
                 label_smoothing=label_smoothing,
             )
+
+            loss = sequence_loss
 
         scaler.scale(loss).backward()
 
@@ -294,16 +310,15 @@ def inference(
     handedness: torch.Tensor,
 ):
     key_padding_mask = (input_tensor != pad_token_id).bool()[:, :, 0].squeeze(-1)
-    logits = model(
-        x=input_tensor, key_padding_mask=key_padding_mask, handedness=handedness
+    sequence_logits = model(
+        x=input_tensor, key_padding_mask=key_padding_mask, handedness=handedness,
     )
 
-    probs = F.softmax(logits, dim=-1)
-    _, topi = probs.topk(1)
-    preds = topi.squeeze()
+    sequence_probs = F.softmax(sequence_logits, dim=-1)
+    _, topi = sequence_probs.topk(1)
+    sequence_preds = topi.squeeze()
 
-
-    return logits, preds
+    return sequence_logits, sequence_preds
 
 
 @torch.no_grad()

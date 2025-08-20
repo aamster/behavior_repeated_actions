@@ -220,24 +220,29 @@ class _EncoderBlock(nn.Module):
             return x
 
 
-class TopKPoolHead(torch.nn.Module):
+class ClassifierHead(nn.Module):
     def __init__(self, d_model: int, num_classes: int, k: int):
         super().__init__()
-        self._cls_head = torch.nn.Linear(d_model, num_classes)  # per-frame logits
-        self.gesture_score_head = torch.nn.Linear(d_model, 1)          # gestureness g_t
-        self._k = k
+        self.per_frame = nn.Linear(d_model, num_classes)  # [d -> C]
+        self.k = k
 
-    def forward(self, H):  # H: [B, T, d_model]
-        logits_t = self._cls_head(H)                 # [B, T, C]
-        scores   = self.gesture_score_head(H).squeeze(-1)   # [B, T]
-        k = min(self._k, H.size(1))
-        # top-K along time
-        idx = scores.topk(k, dim=1).indices         # [B, K]
-        # gather the top-K logits
-        b = torch.arange(H.size(0)).unsqueeze(-1).to(H.device)
-        topk_logits = logits_t[b, idx, :]           # [B, K, C]
-        pooled = topk_logits.mean(dim=1)            # [B, C]
-        return pooled, logits_t, scores
+    def forward(self, x: torch.Tensor):
+        """
+        H: [B, T, d]
+        Returns:
+          clip_logits: [B, C]
+          logits_t   : [B, T, C]
+        """
+        B, T, _ = x.shape
+        timestep_logits_raw = self.per_frame(x)          # [B, T, C]
+        # transpose to [B, C, T] to top-k along time dimension per class
+        L = timestep_logits_raw.transpose(1, 2)          # [B, C, T]
+        K = min(self.k, T)
+        # topk values per class over time
+        topk_vals, _ = torch.topk(L, k=K, dim=-1)  # [B, C, K]
+        sequence_logits_raw = topk_vals.mean(dim=-1)       # [B, C]
+
+        return sequence_logits_raw
 
 class EncoderTransformer(nn.Module):
     def __init__(
@@ -263,7 +268,7 @@ class EncoderTransformer(nn.Module):
         self.positional_embedding = nn.Embedding(self._block_size, self._d_model)
         self.handedness_embedding = nn.Embedding(2, self._d_model)
         self.layer_norm = LayerNorm(self._d_model)
-        self.head = TopKPoolHead(d_model=d_model, num_classes=n_classes, k=num_top_gesture_idx)
+        self.head = ClassifierHead(d_model=d_model, num_classes=n_classes, k=num_top_gesture_idx)
         self.blocks = nn.ModuleList(
             [
                 _EncoderBlock(
@@ -289,9 +294,9 @@ class EncoderTransformer(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        handedness: Optional[torch.Tensor],
         key_padding_mask: torch.Tensor,
         return_attention_weights: bool = False,
+        handedness: Optional[torch.Tensor] = None,
     ):
         _, t, _ = x.size()
         if handedness is not None:
@@ -319,8 +324,8 @@ class EncoderTransformer(nn.Module):
             return attention_weights
 
         x = self.layer_norm(x)
-        pooled_gesture_logits, _, _ = self.head(x)
-        return pooled_gesture_logits
+        sequence_logits = self.head(x)
+        return sequence_logits
 
     @property
     def num_params(self, non_embedding: bool = True):
