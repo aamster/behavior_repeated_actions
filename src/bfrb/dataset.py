@@ -65,10 +65,17 @@ CHANNEL_IDX_MAP = {
     "pose_xx_earth_coords": 7, "pose_xy_earth_coords": 8, "pose_xz_earth_coords": 9,
     "pose_yx_earth_coords": 10, "pose_yy_earth_coords": 11, "pose_yz_earth_coords": 12,
     "angular_velocity_x": 13, "angular_velocity_y": 14, "angular_velocity_z": 15,
-    "handedness": 16
+    "handedness": 16, "orientation": 17
 }
 
 RAW_CHANNELS = [x for x in CHANNEL_IDX_MAP if x in ('acc_x', 'acc_y', 'acc_z', 'rot_w', 'rot_x', 'rot_y', 'rot_z')]
+
+ORIENTATION_MAP = {
+    'Seated Lean Non Dom - FACE DOWN': 0,
+    'Lie on Side - Non Dominant': 1,
+    'Seated Straight': 2,
+    'Lie on Back': 3
+}
 
 class BFRBDataset(Dataset):
     def __init__(
@@ -116,6 +123,7 @@ class BFRBDataset(Dataset):
         actions = meta["actions"]
         sequence_length = meta["sequence_length"]
         handedness = meta["handedness"]
+        orientation = ORIENTATION_MAP[meta["orientation"]]
         gesture = actions[gesture_start]
 
         if self._is_train:
@@ -142,20 +150,22 @@ class BFRBDataset(Dataset):
             start = max(0, sequence_length - self._window_length)
             end = min(start + self._window_length, sequence_length)
 
-        feature_idxs = [CHANNEL_IDX_MAP[x] for x in self._features if x not in ("handedness",)]
+        feature_idxs = [CHANNEL_IDX_MAP[x] for x in self._features if x not in ("handedness", "orientation")]
         x =  torch.tensor(self._data[arr_idx, start:end, feature_idxs].read().result(), dtype=torch.float)  # (T, C)
         x = (x - MEAN[feature_idxs]) / STD[feature_idxs]
 
         y = torch.tensor(actions[start:end], dtype=torch.long)
 
 
-        return x, y, gesture, handedness if "handedness" in self._features else None
+        return x, y, gesture, handedness if "handedness" in self._features else None, orientation if "orientation" in self._features else None
 
     @property
     def num_channels(self):
         num_channels = len(self._features)
         if "handedness" in self._features:
             num_channels -= 1 # it gets added separately
+        if "orientation" in self._features:
+            num_channels -= 1
         return num_channels
 
     @property

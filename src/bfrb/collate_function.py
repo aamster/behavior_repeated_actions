@@ -3,13 +3,14 @@ import torch.nn.functional as F
 
 
 class CollateFunction:
-    def __init__(self, pad_token_id: int = 0, fixed_length: int = 64, include_handedness: bool = True):
+    def __init__(self, pad_token_id: int = 0, fixed_length: int = 64, include_handedness: bool = True, include_orientation: bool = True):
         self._pad_token_id = pad_token_id
         self._fixed_length = fixed_length
         self._include_handedness = include_handedness
+        self._include_orientation = include_orientation
 
     def __call__(self, batch):
-        x, y, sequence_y, handedness = zip(*batch)
+        x, y, sequence_y, handedness, orientation = zip(*batch)
         x_padded = torch.nn.utils.rnn.pad_sequence(
             x, batch_first=True, padding_value=self._pad_token_id
         )
@@ -34,4 +35,9 @@ class CollateFunction:
         else:
             handedness = None
 
-        return x_padded, y_padded, sequence_labels, handedness
+        if self._include_orientation:
+            orientation = torch.tensor(orientation, dtype=torch.long)
+        else:
+            orientation = None
+
+        return x_padded, y_padded, sequence_labels, handedness, orientation

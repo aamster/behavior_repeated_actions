@@ -105,7 +105,8 @@ def estimate_performance_metrics(
                 input_tensor,
                 target_tensor,
                 sequence_labels,
-                handedness
+                handedness,
+                orientation,
             ) = next(data_loader_iter)
 
             if torch.cuda.is_available():
@@ -113,11 +114,14 @@ def estimate_performance_metrics(
                 sequence_labels = sequence_labels.to(torch.device(os.environ["DEVICE"]))
                 if handedness is not None:
                     handedness = handedness.to(torch.device(os.environ["DEVICE"]))
+                if orientation is not None:
+                    orientation = orientation.to(torch.device(os.environ["DEVICE"]))
 
             sequence_logits, sequence_preds = inference(
                 model=model,
                 input_tensor=input_tensor,
                 handedness=handedness,
+                orientation=orientation,
                 pad_token_id=PAD_TOKEN_ID,
             )
 
@@ -185,6 +189,7 @@ def train_epoch(
             target_tensor,
             sequence_labels,
             handedness,
+            orientation,
         ) = data
         input_tensor: torch.Tensor
         target_tensor: torch.Tensor
@@ -201,6 +206,8 @@ def train_epoch(
             )
             if handedness is not None:
                 handedness = handedness.to(torch.device(os.environ["DEVICE"]), non_blocking=True)
+            if orientation is not None:
+                orientation = orientation.to(torch.device(os.environ["DEVICE"]), non_blocking=True)
 
         if decay_learning_rate:
             assert learning_rate_decay_config is not None
@@ -275,7 +282,7 @@ def train_epoch(
                 input_tensor != PAD_TOKEN_ID
             ).bool()[:, :, 0].squeeze(-1)
             sequence_logits = model(
-                x=input_tensor, key_padding_mask=key_padding_mask, handedness=handedness,
+                x=input_tensor, key_padding_mask=key_padding_mask, handedness=handedness, orientation=orientation
             )
 
             C_sequence = sequence_logits.size(-1)
@@ -308,10 +315,11 @@ def inference(
     input_tensor: torch.Tensor,
     pad_token_id: int,
     handedness: torch.Tensor,
+    orientation: torch.Tensor,
 ):
     key_padding_mask = (input_tensor != pad_token_id).bool()[:, :, 0].squeeze(-1)
     sequence_logits = model(
-        x=input_tensor, key_padding_mask=key_padding_mask, handedness=handedness,
+        x=input_tensor, key_padding_mask=key_padding_mask, handedness=handedness, orientation=orientation
     )
 
     sequence_probs = F.softmax(sequence_logits, dim=-1)

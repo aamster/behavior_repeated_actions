@@ -86,7 +86,8 @@ def main(config_path: Path):
         collate_fn=CollateFunction(
             fixed_length=config.window_length,
             pad_token_id=PAD_TOKEN_ID,
-            include_handedness="handedness" in config.features
+            include_handedness="handedness" in config.features,
+            include_orientation="orientation" in config.features
         ),
         pin_memory=True,
     )
@@ -98,7 +99,8 @@ def main(config_path: Path):
         collate_fn=CollateFunction(
             fixed_length=config.window_length,
             pad_token_id=PAD_TOKEN_ID,
-            include_handedness="handedness" in config.features
+            include_handedness="handedness" in config.features,
+            include_orientation="orientation" in config.features
         ),
         pin_memory=True,
     )
@@ -114,11 +116,11 @@ def main(config_path: Path):
         n_attention_heads=config.n_head,
         n_layers=config.num_layers,
         d_model=config.d_model,
-        block_size=config.window_length,
+        block_size=config.window_length+1,
         feedforward_hidden_dim=config.feedforward_hidden_dim,
         mlp_activation=config.activation,
         num_channels=train_dataset.num_channels,
-        n_classes=len(ACTION_ID_MAP)
+        n_classes=len(ACTION_ID_MAP),
     ).to(device)
 
     optimizer = optim.AdamW(

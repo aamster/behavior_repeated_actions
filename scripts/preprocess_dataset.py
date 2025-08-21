@@ -203,6 +203,7 @@ def write_data(input_data_path: Path, subject_meta_path: Path, out_path: Path):
             'sequence_length': len(data.loc[sequence_id]),
             'handedness': subject_meta.loc[subject_id]['handedness'],
             "subject_id": subject_id,
+            "orientation": data.loc[sequence_id]['orientation'].iloc[0]
         }
         metadata.append(meta)
 
@@ -346,9 +347,9 @@ def main(input_data_dir: Path, out_path: Path):
         input_path=out_path,
         out_path=out_path.parent,
     )
-    mean, std = get_stats(input_path=out_path.parent)
-    print(mean)
-    print(std)
+    # mean, std = get_stats(input_path=out_path.parent)
+    # print(mean)
+    # print(std)
 
 if __name__ == '__main__':
     main()

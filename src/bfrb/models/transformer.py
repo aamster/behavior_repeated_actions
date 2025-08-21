@@ -7,6 +7,8 @@ from torch import nn
 from torch.nn import LayerNorm
 import torch.nn.functional as F
 
+from bfrb.dataset import ORIENTATION_MAP, PAD_TOKEN_ID
+
 
 class ActivationFunction(Enum):
     GELU = "gelu"
@@ -223,10 +225,11 @@ class _EncoderBlock(nn.Module):
 class ClassifierHead(nn.Module):
     def __init__(self, d_model: int, num_classes: int, k: int):
         super().__init__()
+
         self.per_frame = nn.Linear(d_model, num_classes)  # [d -> C]
         self.k = k
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor, pad_mask: torch.Tensor):
         """
         H: [B, T, d]
         Returns:
@@ -239,6 +242,8 @@ class ClassifierHead(nn.Module):
         L = timestep_logits_raw.transpose(1, 2)          # [B, C, T]
         K = min(self.k, T)
         # topk values per class over time
+
+        L = L.masked_fill(~pad_mask.unsqueeze(1), float('-inf'))
         topk_vals, _ = torch.topk(L, k=K, dim=-1)  # [B, C, K]
         sequence_logits_raw = topk_vals.mean(dim=-1)       # [B, C]
 
@@ -267,6 +272,7 @@ class EncoderTransformer(nn.Module):
         self._n_layers = n_layers
         self.positional_embedding = nn.Embedding(self._block_size, self._d_model)
         self.handedness_embedding = nn.Embedding(2, self._d_model)
+        self.orientation_embedding = nn.Embedding(len(ORIENTATION_MAP), self._d_model)
         self.layer_norm = LayerNorm(self._d_model)
         self.head = ClassifierHead(d_model=d_model, num_classes=n_classes, k=num_top_gesture_idx)
         self.blocks = nn.ModuleList(
@@ -297,6 +303,7 @@ class EncoderTransformer(nn.Module):
         key_padding_mask: torch.Tensor,
         return_attention_weights: bool = False,
         handedness: Optional[torch.Tensor] = None,
+        orientation: Optional[torch.Tensor] = None,
     ):
         _, t, _ = x.size()
         if handedness is not None:
@@ -306,7 +313,7 @@ class EncoderTransformer(nn.Module):
 
         if handedness is not None:
             x = x + handedness.unsqueeze(1)
-        
+
         x = x + self.positional_embedding(torch.arange(0, t, dtype=torch.long, device=x.device))
 
         attention_weights = []
@@ -324,7 +331,7 @@ class EncoderTransformer(nn.Module):
             return attention_weights
 
         x = self.layer_norm(x)
-        sequence_logits = self.head(x)
+        sequence_logits = self.head(x, pad_mask=key_padding_mask)
         return sequence_logits
 
     @property
