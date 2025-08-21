@@ -223,31 +223,20 @@ class _EncoderBlock(nn.Module):
 
 
 class ClassifierHead(nn.Module):
-    def __init__(self, d_model: int, num_classes: int, k: int):
+    def __init__(self, d_model: int, num_classes: int):
         super().__init__()
+        self.attn = nn.Linear(d_model, 1)  # scores over time
+        self.cls = nn.Linear(d_model, num_classes)  # sequence-level classifier
 
-        self.per_frame = nn.Linear(d_model, num_classes)  # [d -> C]
-        self.k = k
-
-    def forward(self, x: torch.Tensor, pad_mask: torch.Tensor):
-        """
-        H: [B, T, d]
-        Returns:
-          clip_logits: [B, C]
-          logits_t   : [B, T, C]
-        """
-        B, T, _ = x.shape
-        timestep_logits_raw = self.per_frame(x)          # [B, T, C]
-        # transpose to [B, C, T] to top-k along time dimension per class
-        L = timestep_logits_raw.transpose(1, 2)          # [B, C, T]
-        K = min(self.k, T)
-        # topk values per class over time
-
-        L = L.masked_fill(~pad_mask.unsqueeze(1), float('-inf'))
-        topk_vals, _ = torch.topk(L, k=K, dim=-1)  # [B, C, K]
-        sequence_logits_raw = topk_vals.mean(dim=-1)       # [B, C]
-
-        return sequence_logits_raw
+    def forward(self, H, pad_mask=None):
+        # H: [B,T,D]
+        # pad_mask: [B,T]=True for valid tokens
+        a = self.attn(H).squeeze(-1)  # [B,T]
+        if pad_mask is not None:
+            a = a.masked_fill(~pad_mask, float('-inf'))
+        w = F.softmax(a, dim=1)  # [B,T]
+        z = (w.unsqueeze(-1) * H).sum(dim=1)  # [B,D]
+        return self.cls(z), w  # logits: [B,C], attn weights: [B,T]
 
 class EncoderTransformer(nn.Module):
     def __init__(
@@ -274,7 +263,7 @@ class EncoderTransformer(nn.Module):
         self.handedness_embedding = nn.Embedding(2, self._d_model)
         self.orientation_embedding = nn.Embedding(len(ORIENTATION_MAP), self._d_model)
         self.layer_norm = LayerNorm(self._d_model)
-        self.head = ClassifierHead(d_model=d_model, num_classes=n_classes, k=num_top_gesture_idx)
+        self.head = ClassifierHead(d_model=d_model, num_classes=n_classes)
         self.blocks = nn.ModuleList(
             [
                 _EncoderBlock(
@@ -331,8 +320,8 @@ class EncoderTransformer(nn.Module):
             return attention_weights
 
         x = self.layer_norm(x)
-        sequence_logits = self.head(x, pad_mask=key_padding_mask)
-        return sequence_logits
+        sequence_logits, cls_attn_weights = self.head(x, pad_mask=key_padding_mask)
+        return sequence_logits, cls_attn_weights
 
     @property
     def num_params(self, non_embedding: bool = True):

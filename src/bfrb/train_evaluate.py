@@ -19,7 +19,8 @@ from loguru import logger
 from torchmetrics.classification import BinaryF1Score, MulticlassF1Score
 from tqdm import tqdm
 
-from bfrb.dataset import BFRB_BEHAVIORS, PAD_TOKEN_ID, ACTION_ID_MAP, BehaviorType
+from bfrb.dataset import BFRB_BEHAVIORS, PAD_TOKEN_ID, ACTION_ID_MAP, BehaviorType, \
+    NON_BFRB_BEHAVIORS
 from bfrb.models.transformer import EncoderTransformer
 
 logger.remove()
@@ -27,6 +28,21 @@ logger.remove()
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")
 logger.add(sys.stderr, level=LOG_LEVEL)
 
+def attn_supervision_loss(w, gesture_mask):
+    """
+    KL divergence between classifier attention weights and gesture mask
+    :param w:
+    :param gesture_mask:
+    :return:
+    """
+    # gesture_mask: [B,T] with 1 on gesture frames, 0 on others
+    # normalize target to a distribution over the gesture region
+    target = gesture_mask.float()
+    target = target / (target.sum(dim=1, keepdim=True) + 1e-9)
+    # Clamp for numerical stability; compute KL(target || w)
+    w = torch.clamp(w, 1e-9, 1.0)
+    target = torch.clamp(target, 1e-9, 1.0)
+    return (target * (target.log() - w.log())).sum(dim=1).mean()
 
 @dataclass
 class LearningRateDecayConfig:
@@ -281,7 +297,7 @@ def train_epoch(
             key_padding_mask = (
                 input_tensor != PAD_TOKEN_ID
             ).bool()[:, :, 0].squeeze(-1)
-            sequence_logits = model(
+            sequence_logits, cls_attn_weights = model(
                 x=input_tensor, key_padding_mask=key_padding_mask, handedness=handedness, orientation=orientation
             )
 
@@ -292,7 +308,11 @@ def train_epoch(
                 label_smoothing=label_smoothing,
             )
 
-            loss = sequence_loss
+            attn_loss = attn_supervision_loss(
+                w=cls_attn_weights,
+                gesture_mask=torch.isin(target_tensor, torch.tensor(list(BFRB_BEHAVIORS.values()) + list(NON_BFRB_BEHAVIORS.values())))
+            )
+            loss = sequence_loss + 0.2 * attn_loss
 
         scaler.scale(loss).backward()
 
@@ -318,7 +338,7 @@ def inference(
     orientation: torch.Tensor,
 ):
     key_padding_mask = (input_tensor != pad_token_id).bool()[:, :, 0].squeeze(-1)
-    sequence_logits = model(
+    sequence_logits, _ = model(
         x=input_tensor, key_padding_mask=key_padding_mask, handedness=handedness, orientation=orientation
     )
 
