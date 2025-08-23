@@ -10,7 +10,7 @@ import tensorstore
 from scipy.spatial.transform import Rotation
 from tqdm import tqdm
 
-from bfrb.dataset import ACTION_ID_MAP, CHANNEL_IDX_MAP, RAW_CHANNELS, BehaviorType, BFRB_BEHAVIORS
+from bfrb.dataset import ACTION_ID_MAP, CHANNEL_IDX_MAP, RAW_CHANNELS
 
 
 def _calculate_angular_velocity(
@@ -30,30 +30,75 @@ def _calculate_angular_velocity(
 
     return omega
 
-def extract_features(orientation: np.ndarray, linear_acceleration: np.ndarray, quat_order: str = "wxyz"):
+
+def extract_features(
+    orientation: np.ndarray,
+    linear_acceleration: np.ndarray,    # [T,3]
+    quat_order: str = "wxyz",
+    dt_sec: float = 1/7        # estimate
+):
     assert orientation.shape[-1] == 4 and linear_acceleration.shape[-1] == 3
     assert orientation.shape[0] == linear_acceleration.shape[0]
 
-    rot = Rotation.from_quat(
-        orientation,
-        scalar_first=(quat_order.lower() == "wxyz")
-    )
+    q = orientation / np.linalg.norm(orientation, axis=1, keepdims=True)
+    rot = Rotation.from_quat(q, scalar_first=(quat_order.lower() == "wxyz"))
 
-    R_earth = rot.as_matrix()                        # [T,3,3]
-    x_earth = R_earth[:, :, 0]                       # [T,3]
-    y_earth = R_earth[:, :, 1]                       # [T,3]
+    R_earth = rot.as_matrix()                 # [T,3,3]
+    x_earth = R_earth[:, :, 0]
+    y_earth = R_earth[:, :, 1]
 
-    # x, y should be unit and orthogonal
-    assert np.allclose(np.linalg.norm(x_earth, axis=1), 1, atol=1e-5)
-    assert np.allclose(np.linalg.norm(y_earth, axis=1), 1, atol=1e-5)
-    assert np.allclose((x_earth * y_earth).sum(1), 0, atol=1e-4)
+    # gravity direction in device frame: g_hat = R^T * e_z
+    ez = np.array([0.0, 0.0, 1.0])
+    g_hat = np.matmul(R_earth.transpose(0, 2, 1), ez)     # [T,3]
+    g_hat = g_hat / np.linalg.norm(g_hat, axis=1, keepdims=True)
 
-    ang_velocity = _calculate_angular_velocity(
-        rotation=rot,
-        acceleration=linear_acceleration,
+    a = linear_acceleration
+    a_vert = (a * g_hat).sum(axis=1)
+    a_hvec = a - a_vert[:, None] * g_hat
+    a_horz = np.linalg.norm(a_hvec, axis=1)
 
-    )
-    feat = np.concatenate([x_earth, y_earth, ang_velocity], axis=1)
+    ang_velocity = _calculate_angular_velocity(rotation=rot, acceleration=linear_acceleration)
+
+    # split gyro about gravity
+    w_spin = (ang_velocity * g_hat).sum(axis=1)
+    w_tilt = np.linalg.norm(ang_velocity - w_spin[:, None] * g_hat, axis=1)
+
+    # tilt angle (rad)
+    tilt = np.arccos(np.clip(g_hat[:, 2], -1.0, 1.0))
+
+    # geodesic orientation change per step (rad)
+    delta = rot[:-1].inv() * rot[1:]
+    theta = np.linalg.norm(delta.as_rotvec(), axis=1)
+    theta = np.pad(theta, (1, 0))  # align to [T]
+
+    # jerk per step and (if dt available) per second
+    jerk = np.linalg.norm(np.diff(linear_acceleration, axis=0), axis=1)
+    jerk = np.pad(jerk, (1, 0))
+
+    dt_hat = dt_sec
+
+    if dt_hat is not None and dt_hat > 0:
+        theta_rate = theta / dt_hat
+        jerk_rate  = jerk  / dt_hat
+    else:
+        # keep per-step versions if dt unknown
+        theta_rate = theta
+        jerk_rate  = jerk
+
+    feat = np.concatenate([
+        x_earth,                      # 3
+        y_earth,                      # 3
+        ang_velocity,                 # 3
+        a_vert[:, None],              # 1
+        a_horz[:, None],              # 1
+        w_spin[:, None],              # 1
+        w_tilt[:, None],              # 1
+        tilt[:, None],                # 1
+        theta[:, None],               # 1  (per step)
+        theta_rate[:, None],          # 1  (≈ per second if dt known)
+        jerk_rate[:, None],           # 1
+    ], axis=1)
+
     return feat
 
 def get_excluded_sequences(data: pd.DataFrame):
@@ -169,10 +214,6 @@ def write_data(input_data_path: Path, subject_meta_path: Path, out_path: Path):
 
         acc_idxs = [CHANNEL_IDX_MAP[f'acc_{x}'] for x in ('x', 'y', 'z')]
         orientation_idxs = [CHANNEL_IDX_MAP[f'rot_{x}'] for x in ('w','x','y','z')]
-        pose_x_earth_coords_idxs = [CHANNEL_IDX_MAP[f'pose_x{x}_earth_coords'] for x in ('x', 'y', 'z')]
-        pose_y_earth_coords_idxs = [CHANNEL_IDX_MAP[f'pose_y{x}_earth_coords'] for x in
-                                    ('x', 'y', 'z')]
-        angular_velocity_idxs = [CHANNEL_IDX_MAP[f'angular_velocity_{x}'] for x in ('x','y','z')]
 
         raw = preprocessed[sequence_idx, :sequence_length].read().result()
 
@@ -181,9 +222,8 @@ def write_data(input_data_path: Path, subject_meta_path: Path, out_path: Path):
             linear_acceleration=raw[:, acc_idxs],
         )
 
-        preprocessed[sequence_idx, :sequence_length, pose_x_earth_coords_idxs] = features[:, :3]
-        preprocessed[sequence_idx, :sequence_length, pose_y_earth_coords_idxs] = features[:, 3:6]
-        preprocessed[sequence_idx, :sequence_length, angular_velocity_idxs] = features[:, 6:]
+        new_feature_idxs = [i for k, i in CHANNEL_IDX_MAP.items() if k not in RAW_CHANNELS and k not in ("handedness", "orientation")]
+        preprocessed[sequence_idx, :sequence_length, new_feature_idxs] = features
 
         actions = []
         gesture = data.loc[sequence_id]['gesture'].iloc[0]
@@ -338,18 +378,18 @@ def get_stats(input_path: Path):
     type=click.Path(path_type=Path, writable=True)
 )
 def main(input_data_dir: Path, out_path: Path):
-    write_data(
-        input_data_path=input_data_dir / 'train.csv',
-        out_path=out_path,
-        subject_meta_path=input_data_dir / 'train_demographics.csv',
-    )
-    write_train_test_split(
-        input_path=out_path,
-        out_path=out_path.parent,
-    )
-    # mean, std = get_stats(input_path=out_path.parent)
-    # print(mean)
-    # print(std)
+    # write_data(
+    #     input_data_path=input_data_dir / 'train.csv',
+    #     out_path=out_path,
+    #     subject_meta_path=input_data_dir / 'train_demographics.csv',
+    # )
+    # write_train_test_split(
+    #     input_path=out_path,
+    #     out_path=out_path.parent,
+    # )
+    mean, std = get_stats(input_path=out_path.parent)
+    print(mean)
+    print(std)
 
 if __name__ == '__main__':
     main()
