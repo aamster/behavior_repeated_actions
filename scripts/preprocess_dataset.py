@@ -33,58 +33,96 @@ def _calculate_angular_velocity(
 
 def extract_features(
     orientation: np.ndarray,
-    linear_acceleration: np.ndarray,    # [T,3]
+    linear_acceleration: np.ndarray,    # [T,3] in device frame
     quat_order: str = "wxyz",
-    dt_sec: float = 1/7        # estimate
+    dt_sec: float = 1/7                 # sampling-time estimate
 ):
+    """
+    Returns features in this order (new ones marked '*'):
+
+      pose_xx_earth_coords, pose_xy_earth_coords, pose_xz_earth_coords,
+      pose_yx_earth_coords, pose_yy_earth_coords, pose_yz_earth_coords,
+      angular_velocity_x, angular_velocity_y, angular_velocity_z,
+      acc_vertical, acc_horizontal, w_spin, w_tilt, tilt,
+      theta_rate, jerk_rate,
+      *acc_earth_x, *acc_earth_y,
+      *theta_spin_rate, *theta_tilt_rate,
+      *acc_vertical_rate, *acc_horizontal_rate
+    """
     assert orientation.shape[-1] == 4 and linear_acceleration.shape[-1] == 3
     assert orientation.shape[0] == linear_acceleration.shape[0]
+    T = orientation.shape[0]
 
+    # normalize quats (defensive)
     q = orientation / np.linalg.norm(orientation, axis=1, keepdims=True)
     rot = Rotation.from_quat(q, scalar_first=(quat_order.lower() == "wxyz"))
 
+    # Rotation: device -> earth. Columns are device axes in earth coords
     R_earth = rot.as_matrix()                 # [T,3,3]
-    x_earth = R_earth[:, :, 0]
-    y_earth = R_earth[:, :, 1]
+    x_earth = R_earth[:, :, 0]                # [T,3]
+    y_earth = R_earth[:, :, 1]                # [T,3]
+    # (z_earth would be R_earth[:,:,2] = x×y; we omit to avoid redundancy)
 
     # gravity direction in device frame: g_hat = R^T * e_z
     ez = np.array([0.0, 0.0, 1.0])
     g_hat = np.matmul(R_earth.transpose(0, 2, 1), ez)     # [T,3]
     g_hat = g_hat / np.linalg.norm(g_hat, axis=1, keepdims=True)
 
-    a = linear_acceleration
-    a_vert = (a * g_hat).sum(axis=1)
-    a_hvec = a - a_vert[:, None] * g_hat
-    a_horz = np.linalg.norm(a_hvec, axis=1)
+    # Acceleration splits
+    a_dev = linear_acceleration
+    a_vert = (a_dev * g_hat).sum(axis=1)                  # scalar vertical
+    a_hvec = a_dev - a_vert[:, None] * g_hat
+    a_horz = np.linalg.norm(a_hvec, axis=1)               # scalar horizontal magnitude
 
-    ang_velocity = _calculate_angular_velocity(rotation=rot, acceleration=linear_acceleration)
+    # Earth-frame acceleration (new horizontal components)
+    a_earth = np.matmul(R_earth, a_dev[:, :, None]).squeeze(-1)  # [T,3]
+    acc_earth_x = a_earth[:, 0]
+    acc_earth_y = a_earth[:, 1]
+    # (a_earth[:,2] == a_vert)
 
-    # split gyro about gravity
-    w_spin = (ang_velocity * g_hat).sum(axis=1)
+    # Angular velocity in device frame (keep as-is)
+    ang_velocity = _calculate_angular_velocity(rotation=rot, acceleration=linear_acceleration)  # [T,3]
+
+    # Split gyro about gravity
+    w_spin = (ang_velocity * g_hat).sum(axis=1)                  # twist about g (signed)
     w_tilt = np.linalg.norm(ang_velocity - w_spin[:, None] * g_hat, axis=1)
 
-    # tilt angle (rad)
+    # Tilt (angle between device z-axis and gravity) in radians
     tilt = np.arccos(np.clip(g_hat[:, 2], -1.0, 1.0))
 
-    # geodesic orientation change per step (rad)
+    # Quaternion geodesic change (total) → rate
     delta = rot[:-1].inv() * rot[1:]
-    theta = np.linalg.norm(delta.as_rotvec(), axis=1)
-    theta = np.pad(theta, (1, 0))  # align to [T]
+    rotvec = delta.as_rotvec()                                   # [T-1,3]
+    theta_step = np.linalg.norm(rotvec, axis=1)                  # radians per step
+    theta_rate = np.pad(theta_step / dt_sec, (1, 0))             # align to [T]
 
-    # jerk per step and (if dt available) per second
-    jerk = np.linalg.norm(np.diff(linear_acceleration, axis=0), axis=1)
-    jerk = np.pad(jerk, (1, 0))
+    # * Split quaternion change into spin vs tilt rates (new)
+    eps = 1e-12
+    axis = np.zeros_like(rotvec)
+    nz = theta_step > eps
+    axis[nz] = rotvec[nz] / theta_step[nz, None]                 # unit rotation axis per step
 
-    dt_hat = dt_sec
+    g_mid = (g_hat[:-1] + g_hat[1:])                             # mid-step gravity dir
+    g_mid_norm = np.linalg.norm(g_mid, axis=1, keepdims=True)
+    valid = g_mid_norm.squeeze(-1) > eps
+    g_mid[valid] = g_mid[valid] / g_mid_norm[valid]
 
-    if dt_hat is not None and dt_hat > 0:
-        theta_rate = theta / dt_hat
-        jerk_rate  = jerk  / dt_hat
-    else:
-        # keep per-step versions if dt unknown
-        theta_rate = theta
-        jerk_rate  = jerk
+    spin_frac_signed = np.zeros(T-1)
+    if np.any(valid):
+        spin_frac_signed[valid] = np.sum(axis[valid] * g_mid[valid], axis=1)   # ∈[-1,1]
 
+    theta_spin_rate = np.pad((theta_step * spin_frac_signed) / dt_sec, (1, 0))        # signed
+    theta_tilt_rate = np.pad(theta_step * np.sqrt(np.maximum(0.0, 1.0 - spin_frac_signed**2)) / dt_sec, (1, 0))
+
+    # Jerk (linear accel diff) → rate
+    jerk = np.linalg.norm(np.diff(a_dev, axis=0), axis=1)
+    jerk_rate = np.pad(jerk / dt_sec, (1, 0))
+
+    # * Component-wise accel change rates (new)
+    acc_vertical_rate = np.pad(np.diff(a_vert), (1, 0)) / dt_sec
+    acc_horizontal_rate = np.pad(np.diff(a_horz), (1, 0)) / dt_sec
+
+    # Concatenate (drop per-step theta to avoid redundancy)
     feat = np.concatenate([
         x_earth,                      # 3
         y_earth,                      # 3
@@ -94,9 +132,14 @@ def extract_features(
         w_spin[:, None],              # 1
         w_tilt[:, None],              # 1
         tilt[:, None],                # 1
-        theta[:, None],               # 1  (per step)
-        theta_rate[:, None],          # 1  (≈ per second if dt known)
+        theta_rate[:, None],          # 1
         jerk_rate[:, None],           # 1
+        acc_earth_x[:, None],         # 1  *
+        acc_earth_y[:, None],         # 1  *
+        theta_spin_rate[:, None],     # 1  *
+        theta_tilt_rate[:, None],     # 1  *
+        acc_vertical_rate[:, None],   # 1  *
+        acc_horizontal_rate[:, None], # 1  *
     ], axis=1)
 
     return feat
@@ -378,15 +421,15 @@ def get_stats(input_path: Path):
     type=click.Path(path_type=Path, writable=True)
 )
 def main(input_data_dir: Path, out_path: Path):
-    # write_data(
-    #     input_data_path=input_data_dir / 'train.csv',
-    #     out_path=out_path,
-    #     subject_meta_path=input_data_dir / 'train_demographics.csv',
-    # )
-    # write_train_test_split(
-    #     input_path=out_path,
-    #     out_path=out_path.parent,
-    # )
+    write_data(
+        input_data_path=input_data_dir / 'train.csv',
+        out_path=out_path,
+        subject_meta_path=input_data_dir / 'train_demographics.csv',
+    )
+    write_train_test_split(
+        input_path=out_path,
+        out_path=out_path.parent,
+    )
     mean, std = get_stats(input_path=out_path.parent)
     print(mean)
     print(std)

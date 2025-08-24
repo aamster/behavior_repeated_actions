@@ -72,10 +72,12 @@ CHANNEL_IDX_MAP = {
     "acc_vertical": 16, "acc_horizontal": 17,
     "w_spin": 18, "w_tilt": 19,
     "tilt": 20,
-    "theta": 21,
-    "theta_rate": 22,
-    "jerk_rate": 23,
-    "handedness": 24, "orientation": 25
+    "theta_rate": 21,
+    "jerk_rate": 22,
+    "acc_earth_x": 23, "acc_earth_y": 24,
+    "theta_spin_rate": 25, "theta_tilt_rate": 26,
+    "acc_vertical_rate": 27, "acc_horizontal_rate": 28,
+    "handedness": 29, "orientation": 30
 }
 
 RAW_CHANNELS = [x for x in CHANNEL_IDX_MAP if x in ('acc_x', 'acc_y', 'acc_z', 'rot_w', 'rot_x', 'rot_y', 'rot_z')]
