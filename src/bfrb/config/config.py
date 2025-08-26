@@ -3,6 +3,7 @@ from typing import Optional
 
 from pydantic import BaseModel
 
+from bfrb.dataset import CHANNEL_IDX_MAP
 from bfrb.models.transformer import ActivationFunction, PositionalEncodingType
 
 
@@ -38,6 +39,10 @@ class Config(BaseModel):
     class Config:
         extra = "forbid"
 
+
+    def model_post_init(self, __context__):
+        if self.features is None:
+            self.features = list(CHANNEL_IDX_MAP.keys())
 
 class TransformerConfig(Config):
     d_model: int = 256
