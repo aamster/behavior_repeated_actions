@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Literal
 
 import click
 import loguru
@@ -15,7 +15,6 @@ from bfrb.dataset import ACTION_ID_MAP, CHANNEL_IDX_MAP, RAW_CHANNELS
 
 def _calculate_angular_velocity(
         rotation: Rotation,
-        acceleration: np.ndarray,
         sampling_rate: int = 7    # assuming 7 Hz sampling rate
 ):
     T = rotation.as_matrix().shape[0]
@@ -25,123 +24,137 @@ def _calculate_angular_velocity(
     # Relative rotation from t-1 -> t
     rel = rotation[:-1].inv() * rotation[1:]            # [T-1] Rotation objects
     rotvec = rel.as_rotvec()                  # [T-1,3] axis*angle (radians)
-    omega = np.zeros_like(acceleration)           # [T,3]
+    omega = np.zeros((T, 3))           # [T,3]
     omega[1:] = rotvec / dt[:, None]          # rad/s (approx)
 
     return omega
 
 
+
 def extract_features(
-    orientation: np.ndarray,
-    linear_acceleration: np.ndarray,    # [T,3] in device frame
-    quat_order: str = "wxyz",
-    dt_sec: float = 1/7                 # sampling-time estimate
-):
+    *,
+    orientation: np.ndarray,                 # [T,4] quaternions
+    linear_acceleration: np.ndarray,         # [T,3] in device frame
+    quat_order: Literal["wxyz", "xyzw"] = "wxyz",
+    dt_sec: float = 1.0 / 7.0,
+    horiz_std_window: int = 5,               # odd >=3
+    eps: float = 1e-12,
+) -> np.ndarray:
     """
     Returns features in this order (new ones marked '*'):
 
-      pose_xx_earth_coords, pose_xy_earth_coords, pose_xz_earth_coords,
-      pose_yx_earth_coords, pose_yy_earth_coords, pose_yz_earth_coords,
-      angular_velocity_x, angular_velocity_y, angular_velocity_z,
-      acc_vertical, acc_horizontal, w_spin, w_tilt, tilt,
-      theta_rate, jerk_rate,
-      *acc_earth_x, *acc_earth_y,
-      *theta_spin_rate, *theta_tilt_rate,
-      *acc_vertical_rate, *acc_horizontal_rate
+      pose_xx_earth_coords, pose_xy_earth_coords, pose_xz_earth_coords,       (3)
+      pose_yx_earth_coords, pose_yy_earth_coords, pose_yz_earth_coords,       (3)
+      angular_velocity_x, angular_velocity_y, angular_velocity_z,              (3)
+      acc_vertical, acc_horizontal, w_spin, w_tilt, tilt,                      (5)
+      theta_rate, jerk_rate,                                                   (2)
+      *acc_earth_x, *acc_earth_y,                                              (2)
+      *theta_spin_rate, *theta_tilt_rate,                                      (2)
+      *acc_vertical_rate, *acc_horizontal_rate,                                (2)
+      *acc_dd_mag_rate, *acc_horizontal_std_w                                  (2)
+
+    Total dims: 24.
     """
-    assert orientation.shape[-1] == 4 and linear_acceleration.shape[-1] == 3
-    assert orientation.shape[0] == linear_acceleration.shape[0]
-    T = orientation.shape[0]
+    # Coerce window to odd >= 3
+    if horiz_std_window < 3:
+        horiz_std_window = 3
+    if (horiz_std_window % 2) == 0:
+        horiz_std_window += 1
 
-    # normalize quats (defensive)
-    q = orientation / np.linalg.norm(orientation, axis=1, keepdims=True)
+    T: int = int(orientation.shape[0])
+    dt: float = float(dt_sec)
+
+    # Normalize quats and build rotation (device -> earth)
+    q = orientation / (np.linalg.norm(orientation, axis=1, keepdims=True) + eps)
     rot = Rotation.from_quat(q, scalar_first=(quat_order.lower() == "wxyz"))
+    R_earth = rot.as_matrix()                               # [T,3,3]
+    x_earth = R_earth[:, :, 0]                              # [T,3]
+    y_earth = R_earth[:, :, 1]                              # [T,3]
 
-    # Rotation: device -> earth. Columns are device axes in earth coords
-    R_earth = rot.as_matrix()                 # [T,3,3]
-    x_earth = R_earth[:, :, 0]                # [T,3]
-    y_earth = R_earth[:, :, 1]                # [T,3]
-    # (z_earth would be R_earth[:,:,2] = x×y; we omit to avoid redundancy)
-
-    # gravity direction in device frame: g_hat = R^T * e_z
+    # Gravity direction in device frame: g_hat = R^T * e_z
     ez = np.array([0.0, 0.0, 1.0])
-    g_hat = np.matmul(R_earth.transpose(0, 2, 1), ez)     # [T,3]
-    g_hat = g_hat / np.linalg.norm(g_hat, axis=1, keepdims=True)
+    g_hat = (R_earth.transpose(0, 2, 1) @ ez)               # [T,3]
+    g_hat /= (np.linalg.norm(g_hat, axis=1, keepdims=True) + eps)
 
-    # Acceleration splits
-    a_dev = linear_acceleration
-    a_vert = (a_dev * g_hat).sum(axis=1)                  # scalar vertical
-    a_hvec = a_dev - a_vert[:, None] * g_hat
-    a_horz = np.linalg.norm(a_hvec, axis=1)               # scalar horizontal magnitude
+    # Accel splits
+    a_dev = linear_acceleration.astype(np.float64)          # [T,3]
+    a_vert = np.einsum("td,td->t", a_dev, g_hat)            # [T]
+    a_hvec = a_dev - a_vert[:, None] * g_hat                # [T,3]
+    a_horz = np.linalg.norm(a_hvec, axis=1)                 # [T]
 
-    # Earth-frame acceleration (new horizontal components)
-    a_earth = np.matmul(R_earth, a_dev[:, :, None]).squeeze(-1)  # [T,3]
+    # Earth-frame acceleration (x,y for horizontal)
+    a_earth = (R_earth @ a_dev[:, :, None]).squeeze(-1)     # [T,3]
     acc_earth_x = a_earth[:, 0]
     acc_earth_y = a_earth[:, 1]
-    # (a_earth[:,2] == a_vert)
 
-    # Angular velocity in device frame (keep as-is)
-    ang_velocity = _calculate_angular_velocity(rotation=rot, acceleration=linear_acceleration)  # [T,3]
+    # Angular velocity in device frame (from gyro or quat-deltas inside your impl)
+    ang_velocity = _calculate_angular_velocity(rotation=rot)  # [T,3]
 
-    # Split gyro about gravity
-    w_spin = (ang_velocity * g_hat).sum(axis=1)                  # twist about g (signed)
+    # Spin/tilt w.r.t. gravity
+    w_spin = np.einsum("td,td->t", ang_velocity, g_hat)
     w_tilt = np.linalg.norm(ang_velocity - w_spin[:, None] * g_hat, axis=1)
 
-    # Tilt (angle between device z-axis and gravity) in radians
+    # Tilt angle
     tilt = np.arccos(np.clip(g_hat[:, 2], -1.0, 1.0))
 
-    # Quaternion geodesic change (total) → rate
-    delta = rot[:-1].inv() * rot[1:]
-    rotvec = delta.as_rotvec()                                   # [T-1,3]
-    theta_step = np.linalg.norm(rotvec, axis=1)                  # radians per step
-    theta_rate = np.pad(theta_step / dt_sec, (1, 0))             # align to [T]
+    # Quaternion geodesic rate
+    delta = rot[:-1].inv() * rot[1:]                        # [T-1]
+    rotvec = delta.as_rotvec()                              # [T-1,3]
+    theta_step = np.linalg.norm(rotvec, axis=1)             # [T-1]
+    theta_rate = np.pad(theta_step / dt, (1, 0))
 
-    # * Split quaternion change into spin vs tilt rates (new)
-    eps = 1e-12
-    axis = np.zeros_like(rotvec)
-    nz = theta_step > eps
-    axis[nz] = rotvec[nz] / theta_step[nz, None]                 # unit rotation axis per step
+    # Spin vs tilt rates from rotation axis vs mid-step gravity
+    axis = rotvec / (theta_step[:, None] + eps)             # [T-1,3] unit
+    g_mid = (g_hat[:-1] + g_hat[1:])
+    g_mid /= (np.linalg.norm(g_mid, axis=1, keepdims=True) + eps)
+    spin_frac_signed = np.sum(axis * g_mid, axis=1)         # [-1,1]
+    theta_spin_rate = np.pad((theta_step * spin_frac_signed) / dt, (1, 0))
+    theta_tilt_rate = np.pad(theta_step * np.sqrt(np.clip(1.0 - spin_frac_signed**2, 0.0, None)) / dt, (1, 0))
 
-    g_mid = (g_hat[:-1] + g_hat[1:])                             # mid-step gravity dir
-    g_mid_norm = np.linalg.norm(g_mid, axis=1, keepdims=True)
-    valid = g_mid_norm.squeeze(-1) > eps
-    g_mid[valid] = g_mid[valid] / g_mid_norm[valid]
+    # Jerk and component rates
+    da = np.diff(a_dev, axis=0) / dt                        # [T-1,3]
+    jerk_rate = np.pad(np.linalg.norm(da, axis=1), (1, 0))
+    acc_vertical_rate = np.pad(np.diff(a_vert), (1, 0)) / dt
+    acc_horizontal_rate = np.pad(np.diff(a_horz), (1, 0)) / dt
 
-    spin_frac_signed = np.zeros(T-1)
-    if np.any(valid):
-        spin_frac_signed[valid] = np.sum(axis[valid] * g_mid[valid], axis=1)   # ∈[-1,1]
+    # NEW: second finite-difference magnitude of accel (|Δ²a|/dt²)
+    dda = np.diff(da, axis=0) / dt                          # [T-2,3]
+    acc_dd_mag_rate = np.pad(np.linalg.norm(dda, axis=1), (2, 0))
 
-    theta_spin_rate = np.pad((theta_step * spin_frac_signed) / dt_sec, (1, 0))        # signed
-    theta_tilt_rate = np.pad(theta_step * np.sqrt(np.maximum(0.0, 1.0 - spin_frac_signed**2)) / dt_sec, (1, 0))
+    # NEW: short-window std of horizontal accel
+    pad = horiz_std_window // 2
+    xpad = np.pad(a_horz, (pad, pad), mode="edge")
+    # Build rolling [T, win] with stride tricks
+    shape = (T, horiz_std_window)
+    stride = xpad.strides[0]
+    view = np.lib.stride_tricks.as_strided(xpad, shape=shape, strides=(stride, stride))
+    mu = view.mean(axis=1)
+    acc_horizontal_std_w = np.sqrt(np.clip((view**2).mean(axis=1) - mu**2, 0.0, None))
 
-    # Jerk (linear accel diff) → rate
-    jerk = np.linalg.norm(np.diff(a_dev, axis=0), axis=1)
-    jerk_rate = np.pad(jerk / dt_sec, (1, 0))
-
-    # * Component-wise accel change rates (new)
-    acc_vertical_rate = np.pad(np.diff(a_vert), (1, 0)) / dt_sec
-    acc_horizontal_rate = np.pad(np.diff(a_horz), (1, 0)) / dt_sec
-
-    # Concatenate (drop per-step theta to avoid redundancy)
-    feat = np.concatenate([
-        x_earth,                      # 3
-        y_earth,                      # 3
-        ang_velocity,                 # 3
-        a_vert[:, None],              # 1
-        a_horz[:, None],              # 1
-        w_spin[:, None],              # 1
-        w_tilt[:, None],              # 1
-        tilt[:, None],                # 1
-        theta_rate[:, None],          # 1
-        jerk_rate[:, None],           # 1
-        acc_earth_x[:, None],         # 1  *
-        acc_earth_y[:, None],         # 1  *
-        theta_spin_rate[:, None],     # 1  *
-        theta_tilt_rate[:, None],     # 1  *
-        acc_vertical_rate[:, None],   # 1  *
-        acc_horizontal_rate[:, None], # 1  *
-    ], axis=1)
-
+    # Concatenate (24 dims)
+    feat = np.concatenate(
+        [
+            x_earth,                              # 3
+            y_earth,                              # 3
+            ang_velocity,                         # 3
+            a_vert[:, None],                      # 1
+            a_horz[:, None],                      # 1
+            w_spin[:, None],                      # 1
+            w_tilt[:, None],                      # 1
+            tilt[:, None],                        # 1
+            theta_rate[:, None],                  # 1
+            jerk_rate[:, None],                   # 1
+            acc_earth_x[:, None],                 # 1  *
+            acc_earth_y[:, None],                 # 1  *
+            theta_spin_rate[:, None],             # 1  *
+            theta_tilt_rate[:, None],             # 1  *
+            acc_vertical_rate[:, None],           # 1  *
+            acc_horizontal_rate[:, None],         # 1  *
+            acc_dd_mag_rate[:, None],             # 1  *
+            acc_horizontal_std_w[:, None],        # 1  *
+        ],
+        axis=1,
+    )
     return feat
 
 def get_excluded_sequences(data: pd.DataFrame):

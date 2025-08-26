@@ -52,15 +52,18 @@ def run_trial():
 @click.command()
 @click.option(
     '--sweep-config-path',
-    type=click.Path(path_type=Path, readable=True, dir_okay=True)
+    type=click.Path(path_type=Path, readable=True, dir_okay=True),
+    required=True,
 )
 @click.option(
     '--sweep-count',
-    type=int
+    type=int,
+    required=True,
 )
 @click.option(
     '--train-config-path',
-    type=click.Path(path_type=Path, readable=True, dir_okay=True)
+    type=click.Path(path_type=Path, readable=True, dir_okay=True),
+    required=True,
 )
 def main(sweep_config_path: Path, sweep_count, train_config_path: Path):
     with open(sweep_config_path) as f:
