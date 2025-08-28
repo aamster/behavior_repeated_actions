@@ -174,8 +174,8 @@ class BFRBDataset(Dataset):
 
         y = torch.tensor(actions[start:end], dtype=torch.long)
 
-
-        return x, y, gesture, handedness if "handedness" in self._features else None, orientation if "orientation" in self._features else None
+        sequence_label = gesture - min(BFRB_BEHAVIORS.values())
+        return x, y, sequence_label, handedness if "handedness" in self._features else None, orientation if "orientation" in self._features else None
 
     @property
     def num_channels(self):

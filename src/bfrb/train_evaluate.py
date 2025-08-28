@@ -19,7 +19,7 @@ from loguru import logger
 from torchmetrics.classification import BinaryF1Score, MulticlassF1Score
 from tqdm import tqdm
 
-from bfrb.dataset import BFRB_BEHAVIORS, PAD_TOKEN_ID, ACTION_ID_MAP, BehaviorType, \
+from bfrb.dataset import BFRB_BEHAVIORS, PAD_TOKEN_ID, BehaviorType, \
     NON_BFRB_BEHAVIORS
 from bfrb.models.transformer import EncoderTransformer
 
@@ -52,12 +52,14 @@ class LearningRateDecayConfig:
     min_lr: float = 5e-5  # should be ~= learning_rate/10 per Chinchilla
 
 def _compute_f1(labels: list[int], preds: list[int]) -> tuple[float, float, float, list[int], list[int]]:
-    binary_labels = torch.tensor([x in BFRB_BEHAVIORS.values() for x in labels])
-    binary_preds = torch.tensor([x in BFRB_BEHAVIORS.values() for x in preds])
+    bfrb_behaviors = [x-min(BFRB_BEHAVIORS.values()) for x in BFRB_BEHAVIORS.values()]
+
+    binary_labels = torch.tensor([x in bfrb_behaviors for x in labels])
+    binary_preds = torch.tensor([x in bfrb_behaviors for x in preds])
     binary_f1 = BinaryF1Score()(binary_preds, binary_labels)
 
-    macro_labels = torch.tensor([x-min(BFRB_BEHAVIORS.values()) if x in BFRB_BEHAVIORS.values() else len(BFRB_BEHAVIORS) for x in labels], dtype=torch.long)
-    macro_preds = torch.tensor([x-min(BFRB_BEHAVIORS.values()) if x in BFRB_BEHAVIORS.values() else len(BFRB_BEHAVIORS) for x in preds], dtype=torch.long)
+    macro_labels = torch.tensor([x if x in bfrb_behaviors else len(BFRB_BEHAVIORS) for x in labels], dtype=torch.long)
+    macro_preds = torch.tensor([x if x in bfrb_behaviors else len(BFRB_BEHAVIORS) for x in preds], dtype=torch.long)
     macro_f1 = MulticlassF1Score(num_classes=len(BFRB_BEHAVIORS)+1, average='macro')(macro_preds, macro_labels)
 
     return binary_f1, macro_f1, (binary_f1 + macro_f1) / 2, macro_labels.tolist(), macro_preds.tolist()

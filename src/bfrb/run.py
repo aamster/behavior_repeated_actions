@@ -15,7 +15,9 @@ from torch.utils.data import DataLoader
 
 from bfrb.collate_function import CollateFunction
 from bfrb.config.config import TransformerConfig
-from bfrb.dataset import BFRBDataset, ACTION_ID_MAP, PAD_TOKEN_ID
+from bfrb.dataset import BFRBDataset, ACTION_ID_MAP, PAD_TOKEN_ID, BFRB_BEHAVIORS, \
+    NON_BFRB_BEHAVIORS
+from bfrb.models.cnn_rnn import CNNRNNModel
 from bfrb.models.transformer import EncoderTransformer, ProjectionType
 from bfrb.train_evaluate import train, evaluate
 from bfrb.utils.model_loading import fix_model_state_dict
@@ -112,15 +114,10 @@ def main(config_path: Path):
 
     device = torch.device(device)
 
-    model = EncoderTransformer(
-        n_attention_heads=config.n_head,
-        n_layers=config.num_layers,
+    model = CNNRNNModel(
         d_model=config.d_model,
-        block_size=config.window_length+1,
-        feedforward_hidden_dim=config.feedforward_hidden_dim,
-        mlp_activation=config.activation,
         num_channels=train_dataset.num_channels,
-        n_classes=len(ACTION_ID_MAP),
+        num_classes=len(BFRB_BEHAVIORS)+len(NON_BFRB_BEHAVIORS),
     ).to(device)
 
     optimizer = optim.AdamW(
@@ -144,7 +141,7 @@ def main(config_path: Path):
 
     if config.compile:
         logger.info("compiling model")
-        model: EncoderTransformer = torch.compile(model) # type: ignore
+        model: EncoderTransformer | CNNRNNModel = torch.compile(model) # type: ignore
 
     if device.type == "cuda" and config.use_mixed_precision:
         if config.dtype == "bfloat16":
