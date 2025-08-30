@@ -6,11 +6,11 @@ import click
 import loguru
 import numpy as np
 import pandas as pd
-import tensorstore
+import polars
 from scipy.spatial.transform import Rotation
 from tqdm import tqdm
 
-from bfrb.dataset import ACTION_ID_MAP, CHANNEL_IDX_MAP, RAW_CHANNELS
+from bfrb.dataset import ACTION_ID_MAP, RAW_FEATURES
 
 
 def _calculate_angular_velocity(
@@ -30,31 +30,60 @@ def _calculate_angular_velocity(
     return omega
 
 
+def append_size_norm_features(
+    *,
+    X: pd.DataFrame,                               # [T, F]
+    dt_sec: float = 1/7,
+    shoulder_to_wrist_cm: Optional[float] = None,
+    forearm_cm: Optional[float] = None,
+    which_radius: Literal["shoulder", "forearm"] = "shoulder",
+) -> pd.DataFrame:
+    """
+    Appends a few length-normalized features using L and returns (X_out, cols_out).
+    Uses device-frame mags for stability; leverages your existing columns when possible.
+    """
+    G = 9.8
+
+    # ----- pick L (meters) -----
+    L_cm_opt = forearm_cm if which_radius == "forearm" else shoulder_to_wrist_cm
+    L: float = 0.01 * float(L_cm_opt)
+
+    # ----- 1) simple normalized versions of existing features -----
+    for base_name in ("acc_horizontal", "acc_vertical", "jerk_rate"):
+        v = X[base_name] / max(L, 1e-6)
+        new_name = f"{base_name}_over_L"
+        X[new_name] = v
+
+    # ----- 2) compact dimensionless kinematics (needs ω and α) -----
+    w = X[[k for k in  ("angular_velocity_x", "angular_velocity_y", "angular_velocity_z")]].values                # [T,3], rad/s
+    omega = np.linalg.norm(w, axis=1)                         # [T]
+    alpha = np.zeros_like(omega)                              # [T], rad/s^2
+    if dt_sec > 0 and len(omega) > 1:
+        dw = np.diff(w, axis=0) / dt_sec
+        alpha[1:] = np.linalg.norm(dw, axis=1)
+
+    a_cen_over_g = (omega ** 2) * L / G
+    a_tan_over_g = alpha * L / G
+    v_nd = omega * np.sqrt(L / G)
+
+    for name, vec in (("a_cen_over_g", a_cen_over_g),
+                      ("a_tan_over_g", a_tan_over_g),
+                      ("v_nd", v_nd)):
+        X[name] = vec
+
+    return X
 
 def extract_features(
     *,
     orientation: np.ndarray,                 # [T,4] quaternions
     linear_acceleration: np.ndarray,         # [T,3] in device frame
+    forearm_cm: float,
     quat_order: Literal["wxyz", "xyzw"] = "wxyz",
     dt_sec: float = 1.0 / 7.0,
     horiz_std_window: int = 5,               # odd >=3
     eps: float = 1e-12,
-) -> np.ndarray:
-    """
-    Returns features in this order (new ones marked '*'):
-
-      pose_xx_earth_coords, pose_xy_earth_coords, pose_xz_earth_coords,       (3)
-      pose_yx_earth_coords, pose_yy_earth_coords, pose_yz_earth_coords,       (3)
-      angular_velocity_x, angular_velocity_y, angular_velocity_z,              (3)
-      acc_vertical, acc_horizontal, w_spin, w_tilt, tilt,                      (5)
-      theta_rate, jerk_rate,                                                   (2)
-      *acc_earth_x, *acc_earth_y,                                              (2)
-      *theta_spin_rate, *theta_tilt_rate,                                      (2)
-      *acc_vertical_rate, *acc_horizontal_rate,                                (2)
-      *acc_dd_mag_rate, *acc_horizontal_std_w                                  (2)
-
-    Total dims: 24.
-    """
+    which_radius: Literal["shoulder", "forearm"] = "shoulder",
+) -> pd.DataFrame:
     # Coerce window to odd >= 3
     if horiz_std_window < 3:
         horiz_std_window = 3
@@ -131,7 +160,54 @@ def extract_features(
     mu = view.mean(axis=1)
     acc_horizontal_std_w = np.sqrt(np.clip((view**2).mean(axis=1) - mu**2, 0.0, None))
 
-    # Concatenate (24 dims)
+
+    # length features
+    forearm_length: float = 0.01 * float(forearm_cm)
+    acc_horizontal_over_L = a_horz / forearm_length
+    acc_vertical_over_L = a_vert / forearm_length
+    jerk_rate_over_L = jerk_rate / forearm_length
+
+    omega = np.linalg.norm(ang_velocity, axis=1)                         # [T]
+    alpha = np.zeros_like(omega)                              # [T], rad/s^2
+    dw = np.diff(ang_velocity, axis=0) / dt_sec
+    alpha[1:] = np.linalg.norm(dw, axis=1)
+
+    a_cen_over_g = (omega ** 2) * forearm_length / 9.8
+    a_tan_over_g = alpha * forearm_length / 9.8
+    v_nd = omega * np.sqrt(forearm_length / 9.8)
+    
+    names = [
+        "x_earth_x",  # 3
+        "x_earth_y",  # 3
+        "x_earth_z",  # 3
+        "y_earth_x",  # 3
+        "y_earth_y",  # 3
+        "y_earth_z",  # 3
+        "ang_velocity_x",  # 3
+        "ang_velocity_y",  # 3
+        "ang_velocity_z",  # 3
+        "a_vert",  # 1
+        "a_horz",  # 1
+        "w_spin",  # 1
+        "w_tilt",  # 1
+        "tilt",  # 1
+        "theta_rate",  # 1
+        "jerk_rate",  # 1
+        "acc_earth_x",  # 1  *
+        "acc_earth_y",  # 1  *
+        "theta_spin_rate",  # 1  *
+        "theta_tilt_rate",  # 1  *
+        "acc_vertical_rate",  # 1  *
+        "acc_horizontal_rate",  # 1  *
+        "acc_dd_mag_rate",  # 1  *
+        "acc_horizontal_std_w",  # 1  *
+        "acc_horizontal_over_L",
+        "acc_vertical_over_L",
+        "jerk_rate_over_L",
+        "a_cen_over_g",
+        "a_tan_over_g",
+        "v_nd"
+    ]
     feat = np.concatenate(
         [
             x_earth,                              # 3
@@ -152,10 +228,17 @@ def extract_features(
             acc_horizontal_rate[:, None],         # 1  *
             acc_dd_mag_rate[:, None],             # 1  *
             acc_horizontal_std_w[:, None],        # 1  *
+            acc_horizontal_over_L[:, None],
+            acc_vertical_over_L[:, None],
+            jerk_rate_over_L[:, None],
+            a_cen_over_g[:, None],
+            a_tan_over_g[:, None],
+            v_nd[:, None]
         ],
         axis=1,
     )
-    return feat
+
+    return pd.DataFrame(feat, columns=names)
 
 def get_excluded_sequences(data: pd.DataFrame):
     data = data.copy()
@@ -163,76 +246,11 @@ def get_excluded_sequences(data: pd.DataFrame):
     bad = set()
 
     for seq_id in data.index.unique():
-        if np.isnan(data.loc[seq_id][RAW_CHANNELS]).any().any():
+        if np.isnan(data.loc[seq_id][RAW_FEATURES]).any().any():
             bad.add(seq_id)
         elif not 'Performs gesture' in data.loc[seq_id]['behavior'].unique():
             bad.add(seq_id)
     return bad
-
-def open_tensorstore(
-    path: str,
-    create: bool,
-    chunk_shape: Optional[tuple[int, ...]] = None,
-    shard_shape: Optional[tuple[int, ...]] = None,
-    overwrite: bool = False,
-    dtype: Optional[tensorstore.dtype] = None,
-    shape: Optional[tuple[int, ...]] = None,
-    read: bool = False
-) -> tensorstore.TensorStore:
-    """
-    Parameters
-    ----------
-    path: Base path to pyramid containing all levels.
-    create: Whether to create
-    chunk_shape: tensorstore chunk shape
-    shard_shape: tensorstore chunk shape
-    overwrite: Whether to delete the existing tensorstore before writing
-    dtype: tensorstore datatype
-    shape: tensorstore shape
-
-    Returns
-    -------
-    The opened tensorstore.Tensorstore
-    """
-    kvstore = {
-        'driver': 'file',
-        'path': path
-    }
-
-    if create:
-        if chunk_shape is None or shard_shape is None:
-            raise ValueError("Must provide chunk_shape and shard_shape if creating")
-    compression_codec = {
-        "name": "blosc",
-        "configuration": {
-            "cname": "zstd",
-            "clevel": 5,
-            "shuffle": "shuffle",
-        },
-    }
-
-    kwargs = {}
-    if chunk_shape is not None and shard_shape is not None:
-        kwargs["chunk_layout"] = tensorstore.ChunkLayout(
-            read_chunk=tensorstore.ChunkLayout.Grid(shape=chunk_shape),
-            write_chunk=tensorstore.ChunkLayout.Grid(shape=shard_shape),
-        )
-
-    arr = tensorstore.open(
-        spec={
-            "driver": "zarr3",
-            "kvstore": kvstore,
-        },
-        create=create,
-        delete_existing=overwrite,
-        dtype=dtype,
-        shape=shape,
-        codec=tensorstore.CodecSpec({"driver": "zarr3", "codecs": [compression_codec]}),
-        read=read,
-        **kwargs,
-    ).result()
-
-    return arr
 
 def write_data(input_data_path: Path, subject_meta_path: Path, out_path: Path):
     data = pd.read_csv(input_data_path)
@@ -243,43 +261,24 @@ def write_data(input_data_path: Path, subject_meta_path: Path, out_path: Path):
     subject_meta = pd.read_csv(subject_meta_path)
     subject_meta = subject_meta.set_index('subject')
 
-    max_seq_length = data.groupby('sequence_id').size().max()
-
-    shape = (data.index.nunique(), max_seq_length, len(CHANNEL_IDX_MAP))
-
-    preprocessed = open_tensorstore(
-        path=str(out_path),
-        chunk_shape=(1, max_seq_length, shape[2]),
-        shard_shape=shape,
-        overwrite=True,
-        dtype=tensorstore.float64,
-        shape=shape,
-        create=True,
-        read=False
-    )
-
     sequence_ids = data.index.unique()
     metadata = []
+    acc_features = [f'acc_{x}' for x in ('x', 'y', 'z')]
+    orientation_features = [f'rot_{x}' for x in ('w', 'x', 'y', 'z')]
+
+    additional_features = []
     for sequence_idx, sequence_id in tqdm(enumerate(sequence_ids), total=len(sequence_ids)):
-        sequence_length = len(data.loc[sequence_id])
         subject_id = data.loc[sequence_id]['subject'].iloc[0]
 
-        for col_name, channel_idx in {k: v for k, v in CHANNEL_IDX_MAP.items() if k in RAW_CHANNELS}.items():
-            values = data.loc[sequence_id][col_name].values
-            preprocessed[sequence_idx, :sequence_length, channel_idx] = values
-
-        acc_idxs = [CHANNEL_IDX_MAP[f'acc_{x}'] for x in ('x', 'y', 'z')]
-        orientation_idxs = [CHANNEL_IDX_MAP[f'rot_{x}'] for x in ('w','x','y','z')]
-
-        raw = preprocessed[sequence_idx, :sequence_length].read().result()
-
         features = extract_features(
-            orientation=raw[:, orientation_idxs],
-            linear_acceleration=raw[:, acc_idxs],
+            orientation=data.loc[sequence_id, orientation_features].values,
+            linear_acceleration=data.loc[sequence_id, acc_features].values,
+            forearm_cm=subject_meta.loc[subject_id]['elbow_to_wrist_cm']
         )
 
-        new_feature_idxs = [i for k, i in CHANNEL_IDX_MAP.items() if k not in RAW_CHANNELS and k not in ("handedness", "orientation")]
-        preprocessed[sequence_idx, :sequence_length, new_feature_idxs] = features
+        features['sequence_id'] = sequence_id
+        additional_features.append(features)
+
 
         actions = []
         gesture = data.loc[sequence_id]['gesture'].iloc[0]
@@ -298,12 +297,28 @@ def write_data(input_data_path: Path, subject_meta_path: Path, out_path: Path):
             'gesture_start': int(gesture_start),
             'sequence_length': len(data.loc[sequence_id]),
             'handedness': subject_meta.loc[subject_id]['handedness'],
+            'height_cm': subject_meta.loc[subject_id]['height_cm'],
+            'shoulder_to_wrist_cm': subject_meta.loc[subject_id]['shoulder_to_wrist_cm'],
+            'forearm_cm': subject_meta.loc[subject_id]['elbow_to_wrist_cm'],
+            'upper_arm_cm': subject_meta.loc[subject_id]['shoulder_to_wrist_cm'] - subject_meta.loc[subject_id]['elbow_to_wrist_cm'],
             "subject_id": subject_id,
             "orientation": data.loc[sequence_id]['orientation'].iloc[0]
         }
         metadata.append(meta)
 
-    with open(out_path / "meta.json", 'w') as f:
+    additional_features = pd.concat(additional_features).set_index('sequence_id')
+    data = pd.concat([data, additional_features], axis=1).reset_index()
+
+    data[['sequence_id'] + acc_features + orientation_features + list(additional_features.columns)].to_parquet(
+        path=out_path,
+        engine="pyarrow",
+        index=False,
+        partition_cols=["sequence_id"],
+        compression="zstd"
+    )
+
+
+    with open(out_path.parent / "meta.json", 'w') as f:
         f.write(json.dumps(metadata, indent=2))
 
 class DataSplitter:
@@ -328,13 +343,7 @@ class DataSplitter:
         return train_idxs, test_idxs
 
 def write_train_test_split(input_path: Path, out_path: Path, train_frac: float = 0.8):
-    data = open_tensorstore(
-        path=str(input_path),
-        create=False,
-        read=True
-    )
-
-    with open(input_path / 'meta.json') as f:
+    with open(input_path.parent / 'meta.json') as f:
         meta = json.load(f)
 
     subjects = sorted(list(set([x['subject_id'] for x in meta])))
@@ -349,40 +358,30 @@ def write_train_test_split(input_path: Path, out_path: Path, train_frac: float =
     train_meta = [x for x in meta if x['subject_id'] in train_subjects]
     val_meta = [x for x in meta if x['subject_id'] in val_subjects]
 
-    train_idxs = [x['arr_idx'] for x in train_meta]
-    val_idxs = [x['arr_idx'] for x in val_meta]
+    train_sequence_ids = [x['sequence_id'] for x in train_meta]
+    val_sequence_ids = [x['sequence_id'] for x in val_meta]
 
-    loguru.logger.info(f'n train: {len(train_idxs)}')
-    loguru.logger.info(f'n val: {len(val_idxs)}')
+    loguru.logger.info(f'n train: {len(train_sequence_ids)}')
+    loguru.logger.info(f'n val: {len(val_sequence_ids)}')
 
-    train = open_tensorstore(
-        path=str(out_path / 'train.zarr'),
-        create=True,
-        chunk_shape=data.chunk_layout.read_chunk.shape,
-        shard_shape=data.chunk_layout.write_chunk.shape,
-        dtype=data.dtype,
-        shape=(len(train_idxs), *data.shape[1:]),
-        overwrite=True
+
+    train = polars.scan_parquet(
+        source=input_path,
+    ).filter(polars.col("sequence_id").is_in(train_sequence_ids)).collect()
+
+    val = polars.scan_parquet(
+        source=input_path,
+    ).filter(polars.col("sequence_id").is_in(val_sequence_ids)).collect()
+
+    train.write_parquet(
+        file=input_path.parent / 'train.parquet',
+        partition_by=["sequence_id"],
     )
 
-    val = open_tensorstore(
-        path=str(out_path / 'val.zarr'),
-        create=True,
-        chunk_shape=data.chunk_layout.read_chunk.shape,
-        shard_shape=data.chunk_layout.write_chunk.shape,
-        dtype=data.dtype,
-        shape=(len(val_idxs), *data.shape[1:]),
-        overwrite=True
+    val.write_parquet(
+        file=input_path.parent / 'val.parquet',
+        partition_by=["sequence_id"],
     )
-
-    train[:] = data[train_idxs]
-    val[:] = data[val_idxs]
-
-    for i, x in enumerate(train_meta):
-        x['arr_idx'] = i
-
-    for i, x in enumerate(val_meta):
-        x['arr_idx'] = i
 
     with open(out_path / 'train.json', 'w') as f:
         f.write(json.dumps(train_meta, indent=2))
@@ -391,28 +390,31 @@ def write_train_test_split(input_path: Path, out_path: Path, train_frac: float =
         f.write(json.dumps(val_meta, indent=2))
 
 def get_stats(input_path: Path):
-    train = open_tensorstore(
-        path=str(input_path / 'train.zarr'),
-        create=False,
-        read=True
-    )
+
+
 
     with open(input_path / 'train.json') as f:
         meta = json.load(f)
 
-    x = train[:].read().result()
 
-    C = x.shape[-1]
+    C = polars.read_parquet(
+        source=input_path / 'train.parquet' / f'sequence_id={meta[0]["sequence_id"]}',
+    ).shape[-1] - 1
     sum_ = np.zeros(C, dtype=np.float64)
     sumsq_ = np.zeros(C, dtype=np.float64)
     N = 0
 
-    for row_idx in range(x.shape[0]):
-        seq_length = meta[row_idx]['sequence_length']
-        gesture_start = meta[row_idx]['gesture_start']
-        sum_ += np.sum(x[row_idx, gesture_start:seq_length], axis=0)
-        sumsq_ += np.square(x[row_idx, gesture_start:seq_length]).sum(axis=0)
-        N += seq_length
+    sequence_ids = [x['sequence_id'] for x in meta]
+    for i, seq_id in tqdm(enumerate(sequence_ids), total=len(sequence_ids)):
+        seq = polars.read_parquet(
+            source=input_path / 'train.parquet' / f'sequence_id={seq_id}',
+        ).drop('sequence_id')
+
+        seq_length = meta[i]['sequence_length']
+        gesture_start = meta[i]['gesture_start']
+        sum_ += seq[gesture_start:].sum().to_numpy()[0]
+        sumsq_ += (seq[gesture_start:] * seq[gesture_start:]).sum().to_numpy()[0]
+        N += (seq_length - gesture_start)
 
     mean = sum_ / N
 
@@ -422,7 +424,10 @@ def get_stats(input_path: Path):
     var = np.maximum(var, 0.0)
     std = np.sqrt(var)
 
-    return mean.tolist(), std.tolist()
+    column_names = polars.read_parquet(
+        source=input_path / 'train.parquet' / f'sequence_id={meta[0]["sequence_id"]}',
+    ).columns
+    return {column_names[i]: mean[i] for i in range(len(mean))}, {column_names[i]: std[i] for i in range(len(std))}
 
 @click.command()
 @click.option(
@@ -434,15 +439,15 @@ def get_stats(input_path: Path):
     type=click.Path(path_type=Path, writable=True)
 )
 def main(input_data_dir: Path, out_path: Path):
-    write_data(
-        input_data_path=input_data_dir / 'train.csv',
-        out_path=out_path,
-        subject_meta_path=input_data_dir / 'train_demographics.csv',
-    )
-    write_train_test_split(
-        input_path=out_path,
-        out_path=out_path.parent,
-    )
+    # write_data(
+    #     input_data_path=input_data_dir / 'train.csv',
+    #     out_path=out_path,
+    #     subject_meta_path=input_data_dir / 'train_demographics.csv',
+    # )
+    # write_train_test_split(
+    #     input_path=out_path,
+    #     out_path=out_path.parent,
+    # )
     mean, std = get_stats(input_path=out_path.parent)
     print(mean)
     print(std)

@@ -4,7 +4,9 @@
     "parameters": {
         "features": {
             "values": [
-              ["handedness"]
+                null,
+                ["acc_x", "acc_y", "acc_z", "rot_w", "rot_y", "rot_x", "rot_z", "handedness", "orientation"],
+                []
             ]
         }
     }

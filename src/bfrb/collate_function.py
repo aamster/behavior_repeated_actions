@@ -40,4 +40,5 @@ class CollateFunction:
         else:
             orientation = None
 
+
         return x_padded, y_padded, sequence_labels, handedness, orientation

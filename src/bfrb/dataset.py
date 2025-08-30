@@ -5,32 +5,14 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional
 
-import tensorstore
+import pandas as pd
 import torch
 from torch.utils.data import Dataset
+import polars
 
-MEAN = torch.tensor(
-    [0.1259477966683311, 1.535085103383252, -1.4707020724081459, 0.1287327318439677,
-     -0.02932343441655031, 0.0015305499168615695, -0.016453259960534938, -0.10800862129474795,
-     0.03615814147468665, 0.014334191363401746, 0.05933650374826441, 0.02357585837970549,
-     0.15792064942556056, -0.006543846812481386, 0.013397352871217698, 0.0123425650689789,
-     4.293451618068218, 0.6425996694347449, -0.0007630849408804302, 0.2906850553951474,
-     0.8604253990622166, 0.3682642869899371, 7.305033219080255, 0.010397350886161375,
-     -0.02378684767202186, -0.0005808821100810843, 0.28890688386246766, -0.12863269959414533,
-     0.22331555493674402, 84.78721216307726, 0.31354624348845855, 0.0, 0.0]
+MEAN = {'acc_x': 0.2859063536132305, 'acc_y': 3.484702360852425, 'acc_z': -3.3385503986300584, 'rot_w': 0.2922282638187124, 'rot_x': -0.06656532651801965, 'rot_y': 0.003474407312620778, 'rot_z': -0.037349534369027416, 'x_earth_x': -0.24518373397585927, 'x_earth_y': 0.08208037501189866, 'x_earth_z': 0.03253916696531566, 'y_earth_x': 0.13469615087827685, 'y_earth_y': 0.05351810735041136, 'y_earth_z': 0.35848596189732457, 'ang_velocity_x': -0.014854784523837166, 'ang_velocity_y': 0.030412507473762958, 'ang_velocity_z': 0.02801809850154442, 'a_vert': 9.746300681775748, 'a_horz': 1.4587260212655349, 'w_spin': -0.00173223223204785, 'w_tilt': 0.6598662813986627, 'tilt': 1.9531988245090337, 'theta_rate': 0.8359741277295686, 'jerk_rate': 16.582707009879048, 'acc_earth_x': 0.02360238732026308, 'acc_earth_y': -0.053997061177420015, 'theta_spin_rate': -0.0013186247823754227, 'theta_tilt_rate': 0.6558297634725405, 'acc_vertical_rate': -0.29200118675546094, 'acc_horizontal_rate': 0.5069349183234549, 'acc_dd_mag_rate': 192.4702400821918, 'acc_horizontal_std_w': 0.7117620596490517, 'acc_horizontal_over_L': 5.802972452977738, 'acc_vertical_over_L': 38.79373311802501, 'jerk_rate_over_L': 65.85741480188229, 'a_cen_over_g': 0.05102344765721896, 'a_tan_over_g': 0.20162751079753205, 'v_nd': 0.13398820729530705}
 
-)
-STD = torch.tensor(
-    [3.962543356743154, 3.666833795106159, 3.4563036864505814, 0.19051854299253687,
-     0.33545037104476966, 0.4232926938469801, 0.3079206146210989, 0.3786996120256004,
-     0.3694001307113988, 0.38402155956006884, 0.40831743848730173, 0.3320623514531971,
-     0.3667656531355792, 0.4345673392862545, 0.6561690445779216, 0.5062319259347158,
-     4.953905505097491, 1.49697292243475, 0.5203288714680956, 0.721672697257727, 1.029776589136225,
-     0.8604844072425396, 16.40132211159362, 1.1219141169827798, 1.1808882507450125,
-     0.5347602529923056, 0.7117695884429263, 10.540643271583296, 7.707519108084458,
-     196.59429690634062, 0.6636580678724984, 0.0, 0.0]
-
-)
+STD = {'acc_x': 5.966392904390007, 'acc_y': 4.8711757864544465, 'acc_z': 4.569688674039315, 'rot_w': 0.18605990792421245, 'rot_x': 0.5029527799524269, 'rot_y': 0.6377548690044493, 'rot_z': 0.4630912189426574, 'x_earth_x': 0.5402969844266604, 'x_earth_y': 0.5531655290584637, 'x_earth_z': 0.5780795942823888, 'y_earth_x': 0.6068914886777793, 'y_earth_y': 0.49870258477627877, 'y_earth_z': 0.4831759794885121, 'ang_velocity_x': 0.6546529890361168, 'ang_velocity_y': 0.9883649954838085, 'ang_velocity_z': 0.7624338082798533, 'a_vert': 1.601348660919818, 'a_horz': 1.9739523910100338, 'w_spin': 0.7839600776560961, 'w_tilt': 0.9688404915786197, 'tilt': 0.5223365853541633, 'theta_rate': 1.13570201602545, 'jerk_rate': 21.372858179112406, 'acc_earth_x': 1.6902562143090505, 'acc_earth_y': 1.7787441698507547, 'theta_spin_rate': 0.8057037979291475, 'theta_tilt_rate': 0.9536240265493907, 'acc_vertical_rate': 15.879713275979476, 'acc_horizontal_rate': 11.606454876642841, 'acc_dd_mag_rate': 258.8622462978494, 'acc_horizontal_std_w': 0.846395581063555, 'acc_horizontal_over_L': 7.859103235836185, 'acc_vertical_over_L': 7.187176559398683, 'jerk_rate_over_L': 84.76246794256257, 'a_cen_over_g': 0.18317336537501372, 'a_tan_over_g': 0.2805227972300836, 'v_nd': 0.18185325942365946}
 
 class BehaviorType(Enum):
     BFRB = 'BFRB'
@@ -68,25 +50,15 @@ NON_BFRB_BEHAVIORS = {k: v for k, v in ACTION_ID_MAP.items() if 11 <= v <= 20}
 
 PAD_TOKEN_ID = len(ACTION_ID_MAP) + 1
 
-CHANNEL_IDX_MAP = {
-    "acc_x": 0, "acc_y": 1, "acc_z": 2,
-    "rot_w": 3, "rot_x": 4, "rot_y": 5, "rot_z": 6,
-    "pose_xx_earth_coords": 7, "pose_xy_earth_coords": 8, "pose_xz_earth_coords": 9,
-    "pose_yx_earth_coords": 10, "pose_yy_earth_coords": 11, "pose_yz_earth_coords": 12,
-    "angular_velocity_x": 13, "angular_velocity_y": 14, "angular_velocity_z": 15,
-    "acc_vertical": 16, "acc_horizontal": 17,
-    "w_spin": 18, "w_tilt": 19,
-    "tilt": 20,
-    "theta_rate": 21,
-    "jerk_rate": 22,
-    "acc_earth_x": 23, "acc_earth_y": 24,
-    "theta_spin_rate": 25, "theta_tilt_rate": 26,
-    "acc_vertical_rate": 27, "acc_horizontal_rate": 28,
-    "acc_dd_mag_rate": 29, "acc_horizontal_std_w": 30,
-    "handedness": 31, "orientation": 32
-}
-
-RAW_CHANNELS = [x for x in CHANNEL_IDX_MAP if x in ('acc_x', 'acc_y', 'acc_z', 'rot_w', 'rot_x', 'rot_y', 'rot_z')]
+RAW_FEATURES = [
+    'acc_x',
+    'acc_y',
+    'acc_z',
+    'rot_w',
+    'rot_y',
+    'rot_x',
+    'rot_z',
+]
 
 ORIENTATION_MAP = {
     'Seated Lean Non Dom - FACE DOWN': 0,
@@ -111,38 +83,27 @@ class BFRBDataset(Dataset):
         :param window_length: sequence length to extract from timeseries. 99.9% of examples
             have a gesture length under 64 in the train set
         """
-        if features is None:
-            features = list(CHANNEL_IDX_MAP.keys())
-
-        data = tensorstore.open(spec={ # type: ignore
-            'driver': 'zarr3',
-            'kvstore': {
-                'driver': 'file',
-                'path': str(data_path)
-            }
-        }, read=True).result()
-
         with open(meta_path) as f:
             meta = json.load(f)
 
-        self._data = data
         self._meta = meta
         self._window_length = window_length
         self._is_train = is_train
         self._features = features
+        self._data_path = data_path
 
     def __len__(self):
         return len(self._meta)
 
     def __getitem__(self, idx, gesture_fraction: float = 0.2, sample_setup_window: bool = False):
         meta = self._meta[idx]
-        arr_idx = meta["arr_idx"]
         gesture_start = meta["gesture_start"]
         actions = meta["actions"]
         sequence_length = meta["sequence_length"]
         handedness = meta["handedness"]
         orientation = ORIENTATION_MAP[meta["orientation"]]
         gesture = actions[gesture_start]
+        sequence_id = meta["sequence_id"]
 
         if self._is_train:
             if sample_setup_window and random.random() < 0.5 and gesture_start > self._window_length:
@@ -168,34 +129,42 @@ class BFRBDataset(Dataset):
             start = max(0, sequence_length - self._window_length)
             end = min(start + self._window_length, sequence_length)
 
-        feature_idxs = [CHANNEL_IDX_MAP[x] for x in self._features if x not in ("handedness", "orientation")]
-        x =  torch.tensor(self._data[arr_idx, start:end, feature_idxs].read().result(), dtype=torch.float)  # (T, C)
-        x = (x - MEAN[feature_idxs]) / STD[feature_idxs]
+        x = polars.read_parquet(
+            source=self._data_path / f'sequence_id={sequence_id}',
+        ).drop('sequence_id')
+        x = x[start:end]
+        if self._features is not None:
+            x = x[[c for c in self._features if c not in ("handedness", "orientation")]]
+
+        x =  x.to_torch().float()
+
+        if self._features is not None:
+            mean = {k: v for k, v in MEAN.items() if k in self._features}
+            std = {k: v for k, v in STD.items() if k in self._features}
+        else:
+            mean = MEAN
+            std = STD
+
+        x = (x - torch.tensor(list(mean.values()))) / torch.tensor(list(std.values()))
 
         y = torch.tensor(actions[start:end], dtype=torch.long)
 
         sequence_label = gesture - min(BFRB_BEHAVIORS.values())
-        return x, y, sequence_label, handedness if "handedness" in self._features else None, orientation if "orientation" in self._features else None
+
+        if self._features is not None and "handedness" not in self._features:
+            handedness = None
+        if self._features is not None and "orientation" not in self._features:
+            orientation = None
+        return x, y, sequence_label, handedness, orientation
 
     @property
     def num_channels(self):
-        num_channels = len(self._features)
-        if "handedness" in self._features:
-            num_channels -= 1 # it gets added separately
-        if "orientation" in self._features:
-            num_channels -= 1
+        if self._features is None:
+            num_channels = len(pd.read_parquet(path=self._data_path / f'sequence_id={self._meta[0]["sequence_id"]}').drop('sequence_id').columns)
+        else:
+            num_channels = len(self._features)
+            if "handedness" in self._features:
+                num_channels -= 1
+            if "orientation" in self._features:
+                num_channels -= 1
         return num_channels
-
-    @property
-    def num_raw_classes(self) -> int:
-        return len(ACTION_ID_MAP)
-
-    @property
-    def num_sequence_classes(self) -> int:
-        """
-        The dataset contains labels for 3 setup + 8 BFRB + 10 non-BFRB
-        but task is only to predict sequence labels for 8 BFRB + non-BFRB
-
-        :return:
-        """
-        return len(BFRB_BEHAVIORS) + 1

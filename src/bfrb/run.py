@@ -64,18 +64,18 @@ def main(config_path: Path):
         wandb.config.update({"git_commit": config.git_commit})
 
     train_dataset = BFRBDataset(
-        data_path=config.data_dir / 'train.zarr',
+        data_path=config.data_dir / 'train.parquet',
         meta_path=config.data_dir / 'train.json',
         is_train=True,
         window_length=config.window_length,
-        features=config.features
+        features=config.features,
     )
     val_dataset = BFRBDataset(
-        data_path=config.data_dir / 'val.zarr',
+        data_path=config.data_dir / 'val.parquet',
         meta_path=config.data_dir / 'val.json',
         is_train=False,
         window_length=config.window_length,
-        features=config.features
+        features=config.features,
     )
 
     logger.info(f'Train N: {len(train_dataset)}')
@@ -88,8 +88,8 @@ def main(config_path: Path):
         collate_fn=CollateFunction(
             fixed_length=config.window_length,
             pad_token_id=PAD_TOKEN_ID,
-            include_handedness="handedness" in config.features,
-            include_orientation="orientation" in config.features
+            include_handedness=config.features is None or "handedness" in config.features,
+            include_orientation=config.features is None or "orientation" in config.features
         ),
         pin_memory=True,
     )
@@ -101,8 +101,8 @@ def main(config_path: Path):
         collate_fn=CollateFunction(
             fixed_length=config.window_length,
             pad_token_id=PAD_TOKEN_ID,
-            include_handedness="handedness" in config.features,
-            include_orientation="orientation" in config.features
+            include_handedness=config.features is None or "handedness" in config.features,
+            include_orientation=config.features is None or "orientation" in config.features
         ),
         pin_memory=True,
     )
