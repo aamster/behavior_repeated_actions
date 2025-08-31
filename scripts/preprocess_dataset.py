@@ -6,7 +6,7 @@ import click
 import loguru
 import numpy as np
 import pandas as pd
-import polars
+import polars as pl
 from scipy.spatial.transform import Rotation
 from tqdm import tqdm
 
@@ -15,8 +15,8 @@ from bfrb.dataset import ACTION_ID_MAP, RAW_FEATURES
 
 def _calculate_angular_velocity(
         rotation: Rotation,
-        sampling_rate: int = 7    # assuming 7 Hz sampling rate
-):
+        sampling_rate: int = 200
+) -> np.ndarray:
     T = rotation.as_matrix().shape[0]
 
     dt = np.array([1/sampling_rate] * (T-1))
@@ -30,215 +30,60 @@ def _calculate_angular_velocity(
     return omega
 
 
-def append_size_norm_features(
-    *,
-    X: pd.DataFrame,                               # [T, F]
-    dt_sec: float = 1/7,
-    shoulder_to_wrist_cm: Optional[float] = None,
-    forearm_cm: Optional[float] = None,
-    which_radius: Literal["shoulder", "forearm"] = "shoulder",
-) -> pd.DataFrame:
-    """
-    Appends a few length-normalized features using L and returns (X_out, cols_out).
-    Uses device-frame mags for stability; leverages your existing columns when possible.
-    """
-    G = 9.8
+def _calculate_angular_distance(
+        rotation: Rotation,
+) -> np.ndarray:
+    delta_theta = np.zeros(rotation.as_matrix().shape[0])
+    delta = rotation[:-1].inv() * rotation[1:]
+    rotvec = delta.as_rotvec()
+    delta_theta[1:] = np.linalg.norm(rotvec, axis=1)
 
-    # ----- pick L (meters) -----
-    L_cm_opt = forearm_cm if which_radius == "forearm" else shoulder_to_wrist_cm
-    L: float = 0.01 * float(L_cm_opt)
-
-    # ----- 1) simple normalized versions of existing features -----
-    for base_name in ("acc_horizontal", "acc_vertical", "jerk_rate"):
-        v = X[base_name] / max(L, 1e-6)
-        new_name = f"{base_name}_over_L"
-        X[new_name] = v
-
-    # ----- 2) compact dimensionless kinematics (needs ω and α) -----
-    w = X[[k for k in  ("angular_velocity_x", "angular_velocity_y", "angular_velocity_z")]].values                # [T,3], rad/s
-    omega = np.linalg.norm(w, axis=1)                         # [T]
-    alpha = np.zeros_like(omega)                              # [T], rad/s^2
-    if dt_sec > 0 and len(omega) > 1:
-        dw = np.diff(w, axis=0) / dt_sec
-        alpha[1:] = np.linalg.norm(dw, axis=1)
-
-    a_cen_over_g = (omega ** 2) * L / G
-    a_tan_over_g = alpha * L / G
-    v_nd = omega * np.sqrt(L / G)
-
-    for name, vec in (("a_cen_over_g", a_cen_over_g),
-                      ("a_tan_over_g", a_tan_over_g),
-                      ("v_nd", v_nd)):
-        X[name] = vec
-
-    return X
-
-def extract_features(
-    *,
-    orientation: np.ndarray,                 # [T,4] quaternions
-    linear_acceleration: np.ndarray,         # [T,3] in device frame
-    forearm_cm: float,
-    quat_order: Literal["wxyz", "xyzw"] = "wxyz",
-    dt_sec: float = 1.0 / 7.0,
-    horiz_std_window: int = 5,               # odd >=3
-    eps: float = 1e-12,
-    which_radius: Literal["shoulder", "forearm"] = "shoulder",
-) -> pd.DataFrame:
-    # Coerce window to odd >= 3
-    if horiz_std_window < 3:
-        horiz_std_window = 3
-    if (horiz_std_window % 2) == 0:
-        horiz_std_window += 1
-
-    T: int = int(orientation.shape[0])
-    dt: float = float(dt_sec)
-
-    # Normalize quats and build rotation (device -> earth)
-    q = orientation / (np.linalg.norm(orientation, axis=1, keepdims=True) + eps)
-    rot = Rotation.from_quat(q, scalar_first=(quat_order.lower() == "wxyz"))
-    R_earth = rot.as_matrix()                               # [T,3,3]
-    x_earth = R_earth[:, :, 0]                              # [T,3]
-    y_earth = R_earth[:, :, 1]                              # [T,3]
-
-    # Gravity direction in device frame: g_hat = R^T * e_z
-    ez = np.array([0.0, 0.0, 1.0])
-    g_hat = (R_earth.transpose(0, 2, 1) @ ez)               # [T,3]
-    g_hat /= (np.linalg.norm(g_hat, axis=1, keepdims=True) + eps)
-
-    # Accel splits
-    a_dev = linear_acceleration.astype(np.float64)          # [T,3]
-    a_vert = np.einsum("td,td->t", a_dev, g_hat)            # [T]
-    a_hvec = a_dev - a_vert[:, None] * g_hat                # [T,3]
-    a_horz = np.linalg.norm(a_hvec, axis=1)                 # [T]
-
-    # Earth-frame acceleration (x,y for horizontal)
-    a_earth = (R_earth @ a_dev[:, :, None]).squeeze(-1)     # [T,3]
-    acc_earth_x = a_earth[:, 0]
-    acc_earth_y = a_earth[:, 1]
-
-    # Angular velocity in device frame (from gyro or quat-deltas inside your impl)
-    ang_velocity = _calculate_angular_velocity(rotation=rot)  # [T,3]
-
-    # Spin/tilt w.r.t. gravity
-    w_spin = np.einsum("td,td->t", ang_velocity, g_hat)
-    w_tilt = np.linalg.norm(ang_velocity - w_spin[:, None] * g_hat, axis=1)
-
-    # Tilt angle
-    tilt = np.arccos(np.clip(g_hat[:, 2], -1.0, 1.0))
-
-    # Quaternion geodesic rate
-    delta = rot[:-1].inv() * rot[1:]                        # [T-1]
-    rotvec = delta.as_rotvec()                              # [T-1,3]
-    theta_step = np.linalg.norm(rotvec, axis=1)             # [T-1]
-    theta_rate = np.pad(theta_step / dt, (1, 0))
-
-    # Spin vs tilt rates from rotation axis vs mid-step gravity
-    axis = rotvec / (theta_step[:, None] + eps)             # [T-1,3] unit
-    g_mid = (g_hat[:-1] + g_hat[1:])
-    g_mid /= (np.linalg.norm(g_mid, axis=1, keepdims=True) + eps)
-    spin_frac_signed = np.sum(axis * g_mid, axis=1)         # [-1,1]
-    theta_spin_rate = np.pad((theta_step * spin_frac_signed) / dt, (1, 0))
-    theta_tilt_rate = np.pad(theta_step * np.sqrt(np.clip(1.0 - spin_frac_signed**2, 0.0, None)) / dt, (1, 0))
-
-    # Jerk and component rates
-    da = np.diff(a_dev, axis=0) / dt                        # [T-1,3]
-    jerk_rate = np.pad(np.linalg.norm(da, axis=1), (1, 0))
-    acc_vertical_rate = np.pad(np.diff(a_vert), (1, 0)) / dt
-    acc_horizontal_rate = np.pad(np.diff(a_horz), (1, 0)) / dt
-
-    # NEW: second finite-difference magnitude of accel (|Δ²a|/dt²)
-    dda = np.diff(da, axis=0) / dt                          # [T-2,3]
-    acc_dd_mag_rate = np.pad(np.linalg.norm(dda, axis=1), (2, 0))
-
-    # NEW: short-window std of horizontal accel
-    pad = horiz_std_window // 2
-    xpad = np.pad(a_horz, (pad, pad), mode="edge")
-    # Build rolling [T, win] with stride tricks
-    shape = (T, horiz_std_window)
-    stride = xpad.strides[0]
-    view = np.lib.stride_tricks.as_strided(xpad, shape=shape, strides=(stride, stride))
-    mu = view.mean(axis=1)
-    acc_horizontal_std_w = np.sqrt(np.clip((view**2).mean(axis=1) - mu**2, 0.0, None))
+    return delta_theta
 
 
-    # length features
-    forearm_length: float = 0.01 * float(forearm_cm)
-    acc_horizontal_over_L = a_horz / forearm_length
-    acc_vertical_over_L = a_vert / forearm_length
-    jerk_rate_over_L = jerk_rate / forearm_length
+def extract_features(rotation: np.ndarray, acceleration) -> pd.DataFrame:
+    # Use the fast, simple pandas/Numpy path, then convert back to Polars.
+    g = 9.81
 
-    omega = np.linalg.norm(ang_velocity, axis=1)                         # [T]
-    alpha = np.zeros_like(omega)                              # [T], rad/s^2
-    dw = np.diff(ang_velocity, axis=0) / dt_sec
-    alpha[1:] = np.linalg.norm(dw, axis=1)
+    # --- base arrays ---
+    acc_mag = np.linalg.norm(acceleration, axis=1)
 
-    a_cen_over_g = (omega ** 2) * forearm_length / 9.8
-    a_tan_over_g = alpha * forearm_length / 9.8
-    v_nd = omega * np.sqrt(forearm_length / 9.8)
-    
-    names = [
-        "x_earth_x",  # 3
-        "x_earth_y",  # 3
-        "x_earth_z",  # 3
-        "y_earth_x",  # 3
-        "y_earth_y",  # 3
-        "y_earth_z",  # 3
-        "ang_velocity_x",  # 3
-        "ang_velocity_y",  # 3
-        "ang_velocity_z",  # 3
-        "a_vert",  # 1
-        "a_horz",  # 1
-        "w_spin",  # 1
-        "w_tilt",  # 1
-        "tilt",  # 1
-        "theta_rate",  # 1
-        "jerk_rate",  # 1
-        "acc_earth_x",  # 1  *
-        "acc_earth_y",  # 1  *
-        "theta_spin_rate",  # 1  *
-        "theta_tilt_rate",  # 1  *
-        "acc_vertical_rate",  # 1  *
-        "acc_horizontal_rate",  # 1  *
-        "acc_dd_mag_rate",  # 1  *
-        "acc_horizontal_std_w",  # 1  *
-        "acc_horizontal_over_L",
-        "acc_vertical_over_L",
-        "jerk_rate_over_L",
-        "a_cen_over_g",
-        "a_tan_over_g",
-        "v_nd"
-    ]
-    feat = np.concatenate(
-        [
-            x_earth,                              # 3
-            y_earth,                              # 3
-            ang_velocity,                         # 3
-            a_vert[:, None],                      # 1
-            a_horz[:, None],                      # 1
-            w_spin[:, None],                      # 1
-            w_tilt[:, None],                      # 1
-            tilt[:, None],                        # 1
-            theta_rate[:, None],                  # 1
-            jerk_rate[:, None],                   # 1
-            acc_earth_x[:, None],                 # 1  *
-            acc_earth_y[:, None],                 # 1  *
-            theta_spin_rate[:, None],             # 1  *
-            theta_tilt_rate[:, None],             # 1  *
-            acc_vertical_rate[:, None],           # 1  *
-            acc_horizontal_rate[:, None],         # 1  *
-            acc_dd_mag_rate[:, None],             # 1  *
-            acc_horizontal_std_w[:, None],        # 1  *
-            acc_horizontal_over_L[:, None],
-            acc_vertical_over_L[:, None],
-            jerk_rate_over_L[:, None],
-            a_cen_over_g[:, None],
-            a_tan_over_g[:, None],
-            v_nd[:, None]
-        ],
-        axis=1,
-    )
+    rot_w = np.clip(rotation[:, -1], -1.0, 1.0)
+    rot_angle = 2 * np.arccos(rot_w)
 
-    return pd.DataFrame(feat, columns=names)
+    # per-sequence diffs (assumes your rows are already ordered within each sequence)
+    acc_mag_jerk = np.pad(np.diff(acc_mag), (1, 0))
+    rot_angle_vel = np.pad(np.diff(rot_angle), (1, 0))
+
+    # gravity subtraction via SciPy (your fast path)
+    rot = Rotation.from_quat(rotation)
+    gravity = rot.apply(np.array([0.0, 0.0, g]), inverse=True)  # Nx3
+    lin_acc = acceleration - gravity
+    linear_acc_mag = np.linalg.norm(lin_acc, axis=1)
+    linear_acc_mag_jerk = np.pad(np.diff(linear_acc_mag), (1, 0))
+
+    # your fast implementations (unchanged)
+    ang_vel = _calculate_angular_velocity(rot)      # shape [N, 3]
+    ang_dist = _calculate_angular_distance(rot)     # shape [N]
+
+    # final table (columns exactly as requested)
+    out_pd = pd.DataFrame({
+        "acc_mag": acc_mag,
+        "rot_angle": rot_angle,
+        "acc_mag_jerk": acc_mag_jerk,
+        "rot_angle_vel": rot_angle_vel,
+        "linear_acceleration_x": lin_acc[:, 0],
+        "linear_acceleration_y": lin_acc[:, 1],
+        "linear_acceleration_z": lin_acc[:, 2],
+        "linear_acc_mag": linear_acc_mag,
+        "linear_acc_mag_jerk": linear_acc_mag_jerk,
+        "angular_velocity_x": ang_vel[:, 0],
+        "angular_velocity_y": ang_vel[:, 1],
+        "angular_velocity_z": ang_vel[:, 2],
+        "angular_distance": ang_dist,
+    })
+
+    return out_pd
 
 def get_excluded_sequences(data: pd.DataFrame):
     data = data.copy()
@@ -264,16 +109,15 @@ def write_data(input_data_path: Path, subject_meta_path: Path, out_path: Path):
     sequence_ids = data.index.unique()
     metadata = []
     acc_features = [f'acc_{x}' for x in ('x', 'y', 'z')]
-    orientation_features = [f'rot_{x}' for x in ('w', 'x', 'y', 'z')]
+    orientation_features = [f'rot_{x}' for x in ('x', 'y', 'z', 'w')]
 
     additional_features = []
     for sequence_idx, sequence_id in tqdm(enumerate(sequence_ids), total=len(sequence_ids)):
         subject_id = data.loc[sequence_id]['subject'].iloc[0]
 
         features = extract_features(
-            orientation=data.loc[sequence_id, orientation_features].values,
-            linear_acceleration=data.loc[sequence_id, acc_features].values,
-            forearm_cm=subject_meta.loc[subject_id]['elbow_to_wrist_cm']
+            rotation=data.loc[sequence_id, orientation_features].values,
+            acceleration=data.loc[sequence_id, acc_features].values,
         )
 
         features['sequence_id'] = sequence_id
@@ -316,7 +160,6 @@ def write_data(input_data_path: Path, subject_meta_path: Path, out_path: Path):
         partition_cols=["sequence_id"],
         compression="zstd"
     )
-
 
     with open(out_path.parent / "meta.json", 'w') as f:
         f.write(json.dumps(metadata, indent=2))
@@ -365,13 +208,13 @@ def write_train_test_split(input_path: Path, out_path: Path, train_frac: float =
     loguru.logger.info(f'n val: {len(val_sequence_ids)}')
 
 
-    train = polars.scan_parquet(
+    train = pl.scan_parquet(
         source=input_path,
-    ).filter(polars.col("sequence_id").is_in(train_sequence_ids)).collect()
+    ).filter(pl.col("sequence_id").is_in(train_sequence_ids)).collect()
 
-    val = polars.scan_parquet(
+    val = pl.scan_parquet(
         source=input_path,
-    ).filter(polars.col("sequence_id").is_in(val_sequence_ids)).collect()
+    ).filter(pl.col("sequence_id").is_in(val_sequence_ids)).collect()
 
     train.write_parquet(
         file=input_path.parent / 'train.parquet',
@@ -397,7 +240,7 @@ def get_stats(input_path: Path):
         meta = json.load(f)
 
 
-    C = polars.read_parquet(
+    C = pl.read_parquet(
         source=input_path / 'train.parquet' / f'sequence_id={meta[0]["sequence_id"]}',
     ).shape[-1] - 1
     sum_ = np.zeros(C, dtype=np.float64)
@@ -406,7 +249,7 @@ def get_stats(input_path: Path):
 
     sequence_ids = [x['sequence_id'] for x in meta]
     for i, seq_id in tqdm(enumerate(sequence_ids), total=len(sequence_ids)):
-        seq = polars.read_parquet(
+        seq = pl.read_parquet(
             source=input_path / 'train.parquet' / f'sequence_id={seq_id}',
         ).drop('sequence_id')
 
@@ -424,7 +267,7 @@ def get_stats(input_path: Path):
     var = np.maximum(var, 0.0)
     std = np.sqrt(var)
 
-    column_names = polars.read_parquet(
+    column_names = pl.read_parquet(
         source=input_path / 'train.parquet' / f'sequence_id={meta[0]["sequence_id"]}',
     ).columns
     return {column_names[i]: mean[i] for i in range(len(mean))}, {column_names[i]: std[i] for i in range(len(std))}
@@ -439,15 +282,15 @@ def get_stats(input_path: Path):
     type=click.Path(path_type=Path, writable=True)
 )
 def main(input_data_dir: Path, out_path: Path):
-    # write_data(
-    #     input_data_path=input_data_dir / 'train.csv',
-    #     out_path=out_path,
-    #     subject_meta_path=input_data_dir / 'train_demographics.csv',
-    # )
-    # write_train_test_split(
-    #     input_path=out_path,
-    #     out_path=out_path.parent,
-    # )
+    write_data(
+        input_data_path=input_data_dir / 'train.csv',
+        out_path=out_path,
+        subject_meta_path=input_data_dir / 'train_demographics.csv',
+    )
+    write_train_test_split(
+        input_path=out_path,
+        out_path=out_path.parent,
+    )
     mean, std = get_stats(input_path=out_path.parent)
     print(mean)
     print(std)
