@@ -20,6 +20,7 @@ dependencies = [
     "tensorstore",
     "pyarrow>=21.0.0",
     "transformers>=4.56.0",
+    "polars>=1.33.0",
 ]
 
 [dependency-groups]
