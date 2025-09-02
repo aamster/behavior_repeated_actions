@@ -47,3 +47,16 @@ class TransformerConfig(Config):
     activation: ActivationFunction = ActivationFunction.GELU
     positional_encoding_type: PositionalEncodingType = PositionalEncodingType.LEARNED
     window_length: int = 64
+
+
+class SENetConfig(Config):
+    window_length: int = 64
+
+    d_model: int = 256
+
+    imu_num_channels: int
+
+    bert_num_layers: int
+    bert_num_attention_heads: int
+
+    classifier_num_channels: list[int]

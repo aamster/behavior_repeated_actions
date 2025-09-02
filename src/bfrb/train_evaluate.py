@@ -21,6 +21,7 @@ from tqdm import tqdm
 
 from bfrb.dataset import BFRB_BEHAVIORS, PAD_TOKEN_ID, BehaviorType, \
     NON_BFRB_BEHAVIORS
+from bfrb.models.SENet import CMIModel
 from bfrb.models.transformer import EncoderTransformer
 
 logger.remove()
@@ -180,7 +181,7 @@ def estimate_performance_metrics(
 def train_epoch(
     train_data_loader: DataLoader,
     val_data_loader: DataLoader,
-    model: EncoderTransformer,
+    model: EncoderTransformer | CMIModel,
     optimizer,
     epoch: int,
     model_weights_out_dir: Path,
@@ -299,8 +300,8 @@ def train_epoch(
             key_padding_mask = (
                 input_tensor != PAD_TOKEN_ID
             ).bool()[:, :, 0].squeeze(-1)
-            sequence_logits, cls_attn_weights = model(
-                x=input_tensor, key_padding_mask=key_padding_mask, handedness=handedness, orientation=orientation
+            sequence_logits = model(
+                imu=input_tensor, key_padding_mask=key_padding_mask, handedness=handedness, thm=None, tof=None
             )
 
             C_sequence = sequence_logits.size(-1)
@@ -310,11 +311,7 @@ def train_epoch(
                 label_smoothing=label_smoothing,
             )
 
-            attn_loss = attn_supervision_loss(
-                w=cls_attn_weights,
-                gesture_mask=torch.isin(target_tensor, torch.tensor(list(BFRB_BEHAVIORS.values()) + list(NON_BFRB_BEHAVIORS.values())))
-            )
-            loss = sequence_loss + 0.2 * attn_loss
+            loss = sequence_loss
 
         scaler.scale(loss).backward()
 
@@ -340,8 +337,8 @@ def inference(
     orientation: torch.Tensor,
 ):
     key_padding_mask = (input_tensor != pad_token_id).bool()[:, :, 0].squeeze(-1)
-    sequence_logits, _ = model(
-        x=input_tensor, key_padding_mask=key_padding_mask, handedness=handedness, orientation=orientation
+    sequence_logits = model(
+        imu=input_tensor, key_padding_mask=key_padding_mask, handedness=handedness, thm=None, tof=None
     )
 
     sequence_probs = F.softmax(sequence_logits, dim=-1)
@@ -362,7 +359,7 @@ def evaluate(
 def train(
     train_dataloader,
     val_dataloader,
-    model: EncoderTransformer,
+    model: EncoderTransformer | CMIModel,
     optimizer,
     n_epochs,
     model_weights_out_dir: str,

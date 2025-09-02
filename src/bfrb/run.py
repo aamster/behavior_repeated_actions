@@ -2,6 +2,7 @@ import json
 import os
 import random
 from contextlib import nullcontext
+from enum import Enum
 from pathlib import Path
 
 import click
@@ -14,14 +15,18 @@ from torch import optim
 from torch.utils.data import DataLoader
 
 from bfrb.collate_function import CollateFunction
-from bfrb.config.config import TransformerConfig
+from bfrb.config.config import TransformerConfig, SENetConfig
 from bfrb.dataset import BFRBDataset, ACTION_ID_MAP, PAD_TOKEN_ID, BFRB_BEHAVIORS, \
     NON_BFRB_BEHAVIORS
+from bfrb.models.SENet import CMIModel
 from bfrb.models.cnn_rnn import CNNRNNModel
 from bfrb.models.transformer import EncoderTransformer, ProjectionType
 from bfrb.train_evaluate import train, evaluate
 from bfrb.utils.model_loading import fix_model_state_dict
 
+
+class ModelType(Enum):
+    SENet = 0
 
 @click.command()
 @click.option(
@@ -29,11 +34,19 @@ from bfrb.utils.model_loading import fix_model_state_dict
     type=click.Path(exists=True, readable=True),
     required=True
 )
-def main(config_path: Path):
+@click.option(
+    '--model-type',
+    type=click.Choice(choices=[x for x in ModelType]),
+    required=True
+)
+def main(config_path: Path, model_type: ModelType):
     with open(config_path) as f:
         config = json.load(f)
 
-    config = TransformerConfig.model_validate(config)
+    if model_type == ModelType.SENet:
+        config = SENetConfig.model_validate(config)
+    else:
+        raise ValueError('unsupported')
 
     if config.seed is not None:
         torch.random.manual_seed(config.seed)
@@ -114,11 +127,17 @@ def main(config_path: Path):
 
     device = torch.device(device)
 
-    model = CNNRNNModel(
-        d_model=config.d_model,
-        num_channels=train_dataset.num_channels,
-        num_classes=len(BFRB_BEHAVIORS)+len(NON_BFRB_BEHAVIORS),
-    ).to(device)
+    if model_type == ModelType.SENet:
+        model = CMIModel(
+            d_model=config.d_model,
+            imu_dim=train_dataset.num_channels,
+            thm_dim=None,
+            tof_dim=None,
+            n_classes=len(BFRB_BEHAVIORS)+len(NON_BFRB_BEHAVIORS),
+            config=config
+        ).to(device)
+    else:
+        raise ValueError('unsupported')
 
     optimizer = optim.AdamW(
         model.parameters(),
@@ -141,7 +160,7 @@ def main(config_path: Path):
 
     if config.compile:
         logger.info("compiling model")
-        model: EncoderTransformer | CNNRNNModel = torch.compile(model) # type: ignore
+        model = torch.compile(model) # type: ignore
 
     if device.type == "cuda" and config.use_mixed_precision:
         if config.dtype == "bfloat16":

@@ -19,6 +19,7 @@ dependencies = [
     "torchmetrics>=1.8.0",
     "tensorstore",
     "pyarrow>=21.0.0",
+    "transformers>=4.56.0",
 ]
 
 [dependency-groups]
